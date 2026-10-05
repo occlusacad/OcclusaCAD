@@ -1,0 +1,11 @@
+/build*/
+/out/
+/.vs/
+/.vscode/
+/.idea/
+/cmake-build-*/
+CMakeUserPresets.json
+compile_commands.json
+.DS_Store
+*.swp
+imgui.ini

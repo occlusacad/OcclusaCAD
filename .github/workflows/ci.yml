@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (GCC)
+            os: ubuntu-24.04
+          - name: Windows (MSVC)
+            os: windows-2022
+          - name: macOS (AppleClang)
+            os: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config \
+            libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev \
+            libdbus-1-dev libgl-dev libegl-dev libegl1-mesa-dev mesa-utils
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOCCLUSACAD_HEADLESS_TESTS=${{ runner.os == 'Linux' && 'ON' || 'OFF' }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir build -C Release --output-on-failure -R occlusa_tests
+
+      - name: Headless end-to-end (Mesa llvmpipe)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: ctest --test-dir build -C Release --output-on-failure -R e2e
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: occlusacad-${{ runner.os }}
+          path: |
+            build/bin/
+            build/tests/e2e/designer.png
+            build/tests/e2e_crown/crown.png
+            build/tests/e2e_crown/bridge.png
+          if-no-files-found: ignore

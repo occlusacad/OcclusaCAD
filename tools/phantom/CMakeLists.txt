@@ -1,0 +1,3 @@
+add_executable(occlusa_phantom main.cpp)
+target_link_libraries(occlusa_phantom PRIVATE occlusa_core occlusa_db occlusa_json)
+occlusa_set_compile_options(occlusa_phantom)

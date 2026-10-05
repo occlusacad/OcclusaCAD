@@ -1,0 +1,6 @@
+add_subdirectory(core)
+add_subdirectory(db)
+add_subdirectory(gfx)
+add_subdirectory(ui)
+add_subdirectory(apps/casedb)
+add_subdirectory(apps/designer)
