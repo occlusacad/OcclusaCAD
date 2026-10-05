@@ -5,6 +5,7 @@
 #include "core/crown/InsertionAxis.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <limits>
@@ -14,9 +15,7 @@ namespace occlusa::crown {
 
 namespace {
 
-constexpr int kSideRings1 = 12; // margin -> height of contour
-constexpr int kSideRings2 = 10; // height of contour -> occlusal rim
-constexpr int kCapRings = 12;   // occlusal rim -> centre
+constexpr int kSideRings1 = 12; // margin -> height of contour; the library profile follows
 
 double smoothstep(double e0, double e1, double x)
 {
@@ -37,12 +36,6 @@ double wrapAngle(double a)
     while (a <= -std::numbers::pi)
         a += 2.0 * std::numbers::pi;
     return a;
-}
-
-double superellipseRadius(double c, double s, double a, double b, double n)
-{
-    const double denom = std::pow(std::pow(std::abs(c) / a, n) + std::pow(std::abs(s) / b, n), 1.0 / n);
-    return denom > 1e-12 ? 1.0 / denom : std::max(a, b);
 }
 
 double pointSegmentDistance(const glm::dvec3& p, const glm::dvec3& a, const glm::dvec3& b)
@@ -77,15 +70,15 @@ struct HalfWidths {
     double mesial, distal, buccal, lingual;
 };
 
-HalfWidths halfWidths(const ToothTemplate& t, const CrownParameters& p)
+HalfWidths halfWidths(const ToothShape& t, const CrownParameters& p)
 {
-    return {p.halfMesial > 0 ? p.halfMesial : t.mesioDistal * 0.5, p.halfDistal > 0 ? p.halfDistal : t.mesioDistal * 0.5,
-            p.halfBuccal > 0 ? p.halfBuccal : t.buccoLingual * 0.5, p.halfLingual > 0 ? p.halfLingual : t.buccoLingual * 0.5};
+    return {p.halfMesial > 0 ? p.halfMesial : t.halfMesial, p.halfDistal > 0 ? p.halfDistal : t.halfDistal,
+            p.halfBuccal > 0 ? p.halfBuccal : t.halfBuccal, p.halfLingual > 0 ? p.halfLingual : t.halfLingual};
 }
 
-double crownHeightOf(const ToothTemplate& t, const CrownParameters& p)
+double crownHeightOf(const ToothShape& t, const CrownParameters& p)
 {
-    return p.crownHeight > 0 ? p.crownHeight : t.crownHeight;
+    return p.crownHeight > 0 ? p.crownHeight : t.height;
 }
 
 } // namespace
@@ -305,9 +298,9 @@ ContactScene makeContactScene(const Mesh& prepScan, const CrownBase& base, const
 CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<const float> displacement)
 {
     CrownMesh out;
-    const ToothTemplate& tpl = toothTemplate(p.kind, p.upper);
+    const std::shared_ptr<const ToothShape> shape = toothShape(p.library, p.kind, p.upper);
     const Axes ax = resolveAxes(base.frame, p);
-    const HalfWidths hw = halfWidths(tpl, p);
+    const HalfWidths hw = halfWidths(*shape, p);
     const Mesh& intaglio = *base.intaglio;
     const std::size_t dieCount = intaglio.vertexCount();
     const std::size_t L = base.margin.size();
@@ -351,15 +344,19 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
             colAngle[i] = std::max(colAngle[i], colAngle[i - 1] + 1e-5);
     }
 
-    const double H = crownHeightOf(tpl, p);
+    const double H = crownHeightOf(*shape, p);
+    const double sz = H / std::max(shape->height, 1e-6);
     const double cuspScale = p.coping ? 0.0 : p.cuspScale;
-    const double maxOcc = occlusalMaxHeight(tpl, cuspScale);
-    const double Hb = H - maxOcc;
-    const double n = tpl.squareness;
-    const int sideRings = kSideRings1 + kSideRings2;
-    const int rings = 1 + sideRings + (kCapRings - 1);
+    constexpr int K = ToothShape::kProfile;
+    // Rings: margin, margin -> contour, then the library profile up to (not including) the apex.
+    const int rings = 1 + kSideRings1 + (K - 2);
     out.columns = static_cast<int>(L);
     out.rings = rings;
+    // Cusp scaling exaggerates or flattens the relief around the occlusal level.
+    auto relief = [&](const glm::dvec2& q, double contourR) {
+        const double w = 1.0 - smoothstep(0.6 * contourR, 0.9 * contourR, q.x);
+        return q.y + w * (cuspScale - 1.0) * (q.y - shape->occlusalLevel);
+    };
 
     // Vertex layout: [intaglio (die order)] [rings 1..rings-1, L columns each] [centre].
     out.outerBegin = static_cast<std::uint32_t>(dieCount);
@@ -381,35 +378,50 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
     for (const auto& q : intaglio.positions)
         hTop = std::max(hTop, glm::dot(glm::dvec3(q) - ax.F, ax.A));
 
-    auto support = [&](const glm::dvec3& planeDir, double h, double r, double& rMin, double& hMin) {
-        // Radial support at height h, vertical support at radius r.
+    // Radial support at height h and vertical support at radius r, dilated by `reach` (the required
+    // thickness): the widest wall within `reach` above, the highest top within `reach` inwards.
+    // Without the dilation, points just past an edge of the die would find no support at all.
+    auto support = [&](const glm::dvec3& planeDir, double h, double r, double reach, double& rMin, double& hMin) {
         rMin = -1e9;
         hMin = -1e9;
-        if (auto hit = base.intaglioBvh.raycast(glm::vec3(ax.F + ax.A * h), glm::vec3(planeDir), 30.0f))
-            rMin = hit->t;
-        const glm::dvec3 top = ax.F + planeDir * r + ax.A * (hTop + 20.0);
-        if (auto hit = base.intaglioBvh.raycast(glm::vec3(top), glm::vec3(-ax.A), 60.0f))
-            hMin = hTop + 20.0 - hit->t;
+        for (double dh : {0.0, 0.5, 1.0})
+            if (auto hit = base.intaglioBvh.raycast(glm::vec3(ax.F + ax.A * (h + dh * reach)), glm::vec3(planeDir), 30.0f))
+                rMin = std::max(rMin, static_cast<double>(hit->t));
+        for (double dr : {0.0, 0.5, 1.0}) {
+            const glm::dvec3 top = ax.F + planeDir * std::max(r - dr * reach, 0.0) + ax.A * (hTop + 20.0);
+            if (auto hit = base.intaglioBvh.raycast(glm::vec3(top), glm::vec3(-ax.A), 60.0f))
+                hMin = std::max(hMin, hTop + 20.0 - hit->t);
+        }
     };
 
     parallelFor(L, [&](std::size_t i) {
         const double a = dirSign * colAngle[i];
         const double c = std::cos(a), s = std::sin(a);
         const glm::dvec3 d = ax.M * c + ax.B * s;
-        const double semiA = c >= 0 ? hw.mesial : hw.distal;
-        const double semiB = s >= 0 ? hw.buccal : hw.lingual;
         const double rm = mr[i], hmI = mh[i];
-        double Rc = superellipseRadius(c, s, semiA, semiB, n);
-        double Rr = superellipseRadius(c, s, semiA * tpl.tableMD, semiB * tpl.tableBL, n);
-        const double ur = Rr * c / (semiA * tpl.tableMD), vr = Rr * s / (semiB * tpl.tableBL);
-        double Hr = Hb + occlusalHeight(tpl, ur, vr, cuspScale);
-        Rc = std::max(Rc, rm + 0.4 + p.marginThickness);
-        Rr = std::min(Rr, Rc - 0.2);
-        double Hc = std::max(tpl.contourHeight * H, hmI + 0.8);
-        Hc = std::min(Hc, Hr - 0.8);
-        Hc = std::max(Hc, hmI + 0.5);
-        if (Hr < Hc + 0.5)
-            Hr = Hc + 0.5;
+        // Library azimuth that lands on this column after the anisotropic scaling to the crown size.
+        const double sx = c >= 0 ? hw.mesial / shape->halfMesial : hw.distal / shape->halfDistal;
+        const double sy = s >= 0 ? hw.buccal / shape->halfBuccal : hw.lingual / shape->halfLingual;
+        const double th = std::atan2(s / sy, c / sx);
+        const double radial = std::hypot(sx * std::cos(th), sy * std::sin(th));
+        std::array<glm::dvec2, K> prof;
+        const double contourLib = shape->at(th, 0).x;
+        for (int k = 0; k < K; ++k) {
+            const glm::dvec2 q = shape->at(th, k);
+            prof[static_cast<std::size_t>(k)] = glm::dvec2(q.x * radial, relief(q, contourLib) * sz);
+        }
+        // Keep the height of contour outside and above the margin (fading out towards the apex).
+        const double needR = rm + 0.4 + p.marginThickness;
+        const double needH = hmI + 0.8;
+        const double dR = std::max(0.0, needR - prof[0].x), dH = std::max(0.0, needH - prof[0].y);
+        for (int k = 0; k < K; ++k) {
+            const double f = 1.0 - static_cast<double>(k) / (K - 1);
+            prof[static_cast<std::size_t>(k)].x += dR * f * f;
+            prof[static_cast<std::size_t>(k)].y += dH * f;
+        }
+        const double Rc = prof[0].x, Hc = prof[0].y;
+        double copingContourR = Rc;
+        std::vector<glm::dvec2> rh(static_cast<std::size_t>(rings));
 
         for (int ring = 1; ring < rings; ++ring) {
             double r, h;
@@ -420,20 +432,21 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
                                             {Rc, hmI + 0.7 * (Hc - hmI)}, {Rc, Hc}, t);
                 r = q.x;
                 h = q.y;
-            } else if (ring <= sideRings) {
-                const double t = static_cast<double>(ring - kSideRings1) / kSideRings2;
-                const glm::dvec2 q = bezier({Rc, Hc}, {Rc, Hc + 0.55 * (Hr - Hc)}, {Rr + 0.45 * (Rc - Rr), Hr}, {Rr, Hr}, t);
+            } else if (p.coping) {
+                // Coping: a dome over the die from the contour ring inwards.
+                const double f = static_cast<double>(ring - kSideRings1) / (K - 1);
+                r = copingContourR * (1.0 - f);
+                h = Hc;
+                cap = true;
+            } else {
+                const glm::dvec2 q = prof[static_cast<std::size_t>(ring - kSideRings1)];
                 r = q.x;
                 h = q.y;
-            } else {
-                const double sc = 1.0 - static_cast<double>(ring - sideRings) / kCapRings;
-                r = sc * Rr;
-                h = Hb + occlusalHeight(tpl, sc * ur, sc * vr, cuspScale);
-                cap = true;
+                cap = r < 0.85 * Rc; // occlusal surface: supported vertically only
             }
             const double tau = cap ? p.minThickness : glm::mix(p.marginThickness, p.minThickness, smoothstep(0.0, 1.2, h - hmI));
             double rMin, hMin;
-            support(d, h, r, rMin, hMin);
+            support(d, h, r, p.coping ? p.copingThickness : tau, rMin, hMin);
             if (p.coping) {
                 // Uniform shell over the intaglio.
                 const double thick = std::max(p.copingThickness * smoothstep(0.0, 1.0, h - hmI), p.marginThickness);
@@ -441,6 +454,8 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
                     r = rMin + thick;
                 if (hMin > -1e8 && (cap || h < hMin + thick))
                     h = hMin + thick;
+                if (ring == kSideRings1)
+                    copingContourR = r;
             } else {
                 // Side walls are supported radially, the occlusal cap only vertically (pushing cap
                 // rings outwards would fold them over each other).
@@ -450,16 +465,23 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
                     h = hMin + tau;
             }
             const std::uint32_t vi = index(ring, i);
-            pos[vi] = glm::vec3(ax.F + ax.A * h + d * r);
+            rh[static_cast<std::size_t>(ring)] = glm::dvec2(r, h);
             required[vi] = static_cast<float>(p.coping ? std::min(tau, p.copingThickness) : tau);
             weight[vi] = ring <= kSideRings1 ? static_cast<float>(smoothstep(1.0, 4.0, ring)) : 1.0f;
         }
+        // From the height of contour to the apex the radius must not grow again, or the thickness
+        // pushes above would fold the surface over itself: push outer rings out where needed.
+        for (int ring = rings - 1; ring > kSideRings1; --ring)
+            rh[static_cast<std::size_t>(ring - 1)].x = std::max(rh[static_cast<std::size_t>(ring - 1)].x, rh[static_cast<std::size_t>(ring)].x);
+        for (int ring = 1; ring < rings; ++ring)
+            pos[index(ring, i)] = glm::vec3(ax.F + ax.A * rh[static_cast<std::size_t>(ring)].y + d * rh[static_cast<std::size_t>(ring)].x);
     });
     {
-        double h = Hb + occlusalHeight(tpl, 0.0, 0.0, cuspScale);
-        double rMin, hMin;
-        support(ax.M, h, 0.0, rMin, hMin);
+        const glm::dvec2 apex = shape->at(0.0, K - 1);
+        double h = relief(apex, 1e-9 + shape->at(0.0, 0).x) * sz;
         const double tau = p.coping ? p.copingThickness : p.minThickness;
+        double rMin, hMin;
+        support(ax.M, h, 0.0, tau, rMin, hMin);
         if (hMin > -1e8 && (p.coping || h < hMin + tau))
             h = hMin + tau;
         pos[centre] = glm::vec3(ax.F + ax.A * h);
@@ -524,8 +546,13 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
             if (out.editWeight[v] <= 0.0f)
                 return;
             const float need = out.requiredThickness[v];
-            if (auto cp = base.intaglioBvh.closestPoint(m.positions[v], need + 1.0f)) {
-                if (cp->signedDistance < need * 0.98f) {
+            if (auto cp = base.intaglioBvh.closestPoint(m.positions[v], need + 6.0f)) {
+                if (cp->signedDistance < 0.0f) {
+                    // Carved through the intaglio: back out along the intaglio normal.
+                    m.positions[v] = cp->point + cp->normal * need;
+                    thickened[v] = 1;
+                    ++moved;
+                } else if (cp->signedDistance < need * 0.98f) {
                     // Move away from the intaglio along its normal, blended with the shell normal.
                     const glm::vec3 dir = glm::normalize(cp->normal + out.baseNormals[v]);
                     const float along = std::max(glm::dot(dir, cp->normal), 0.3f);
@@ -541,8 +568,12 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
     for (int t : thickened)
         out.thickenedVertices += t;
     m.computeVertexNormals();
+    // Reported over the full-thickness zone (the required thickness ramps up from the margin).
+    float fullThickness = 0.0f;
+    for (std::size_t v = out.outerBegin; v < m.vertexCount(); ++v)
+        fullThickness = std::max(fullThickness, out.requiredThickness[v]);
     for (std::size_t v = out.outerBegin; v < m.vertexCount(); ++v) {
-        if (out.editWeight[v] < 0.999f)
+        if (out.editWeight[v] < 0.999f || out.requiredThickness[v] < 0.99f * fullThickness)
             continue;
         if (auto cp = base.intaglioBvh.closestPoint(m.positions[v], 5.0f))
             minThick = std::min(minThick, static_cast<double>(cp->signedDistance));
@@ -559,11 +590,11 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
 
 void fitProximal(const CrownBase& base, const ContactScene& contacts, CrownParameters& p)
 {
-    const ToothTemplate& tpl = toothTemplate(p.kind, p.upper);
+    const std::shared_ptr<const ToothShape> shape = toothShape(p.library, p.kind, p.upper);
     p.shiftMesial = 0.0;
     p.shiftBuccal = 0.0;
     const Axes ax = resolveAxes(base.frame, p);
-    const double H = crownHeightOf(tpl, p);
+    const double H = crownHeightOf(*shape, p);
     double hMarginMax = -1e9;
     double extent[4] = {0, 0, 0, 0}; // margin extent towards +M, -M, +B, -B
     for (const auto& q : base.margin) {
@@ -574,7 +605,7 @@ void fitProximal(const CrownBase& base, const ContactScene& contacts, CrownParam
         extent[2] = std::max(extent[2], glm::dot(d, ax.B));
         extent[3] = std::max(extent[3], -glm::dot(d, ax.B));
     }
-    const double Hc = std::max(tpl.contourHeight * H, hMarginMax + 1.0);
+    const double Hc = std::max(shape->contourHeight * H, hMarginMax + 1.0);
     auto gap = [&](const glm::dvec3& dir) -> double {
         if (!contacts.neighbors)
             return -1.0;
@@ -587,15 +618,14 @@ void fitProximal(const CrownBase& base, const ContactScene& contacts, CrownParam
         return best;
     };
     const double dm = gap(ax.M), dd = gap(-ax.M);
-    const double scaleMD = tpl.mesioDistal * 0.5;
-    p.halfMesial = dm > 0 ? dm - p.proximalTarget : scaleMD;
-    p.halfDistal = dd > 0 ? dd - p.proximalTarget : scaleMD;
+    p.halfMesial = dm > 0 ? dm - p.proximalTarget : shape->halfMesial;
+    p.halfDistal = dd > 0 ? dd - p.proximalTarget : shape->halfDistal;
     p.halfMesial = std::max(p.halfMesial, extent[0] + 0.5);
     p.halfDistal = std::max(p.halfDistal, extent[1] + 0.5);
     // Bucco-lingual width follows the mesio-distal fit proportionally (anatomic ratio).
-    const double ratio = std::clamp((p.halfMesial + p.halfDistal) / tpl.mesioDistal, 0.75, 1.3);
-    p.halfBuccal = std::max(tpl.buccoLingual * 0.5 * std::sqrt(ratio), extent[2] + 0.6);
-    p.halfLingual = std::max(tpl.buccoLingual * 0.5 * std::sqrt(ratio), extent[3] + 0.6);
+    const double ratio = std::clamp((p.halfMesial + p.halfDistal) / (shape->halfMesial + shape->halfDistal), 0.75, 1.3);
+    p.halfBuccal = std::max(shape->halfBuccal * std::sqrt(ratio), extent[2] + 0.6);
+    p.halfLingual = std::max(shape->halfLingual * std::sqrt(ratio), extent[3] + 0.6);
 }
 
 bool fitOcclusalHeight(const CrownBase& base, const ContactScene& contacts, CrownParameters& p, std::span<const float> displacement)

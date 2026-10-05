@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <optional>
+#include <string>
 #include <span>
 #include <vector>
 
@@ -14,6 +15,7 @@ namespace occlusa::crown {
 
 // Design parameters of one crown. Distances in mm.
 struct CrownParameters {
+    std::string library;           // tooth library id (empty = the default library)
     ToothKind kind = ToothKind::FirstMolar;
     bool upper = false;
     bool coping = false;           // uniform-thickness coping instead of full anatomy
@@ -101,7 +103,7 @@ struct CrownMesh {
     int columns = 0, rings = 0;
     bool watertight = false;
     double volume = 0.0;                // mm^3
-    double minThickness = 0.0;          // achieved, over the editable outer surface
+    double minThickness = 0.0;          // achieved, where the full minimum thickness is required
     int thickenedVertices = 0;          // pushed out to reach the minimum thickness
 };
 

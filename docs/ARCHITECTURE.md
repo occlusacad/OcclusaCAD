@@ -75,10 +75,11 @@ All geometry lives in `core/crown` (no GUI), in the coordinates of the scan cont
 3. **Die** (`extractDie`): the scan is cut along the margin edges by a face flood fill from the preparation point. A margin that does not separate the preparation is detected (the fill escapes) and reported.
 4. **Insertion axis**: the default minimises the area-weighted squared undercut (faces facing away from the axis) within 25° of the margin normal. **Blockout** works in cylindrical coordinates around the axis: a die point is undercut when material higher up along the axis sticks out further. Points closer than 0.05 mm in height are ignored, so flat shoulders and scan noise are not blocked out.
 5. **Intaglio**: the die is offset along its normals by the cement gap. The gap ramps in over the distance to the margin, and an extra gap is added 1 mm further up. The result is then blocked out along the axis. The margin itself stays on a smoothed margin curve.
-6. **Outer shell** (`buildCrown`): a structured grid whose bottom ring **is** the margin.
-   * Each margin vertex starts a column. Its profile runs margin → height of contour → occlusal rim (two cubic Béziers), then onto the occlusal cap.
-   * The cap is a height field from the tooth template: a fossa bowl, Gaussian cusps and a central fissure, on a superellipse outline.
-   * Walls are pushed out radially and the cap vertically to keep the minimum thickness over the intaglio. Thickness ramps from the margin thickness over the first 1.2 mm.
+6. **Outer shell** (`buildCrown`): a structured grid whose bottom ring **is** the margin. The anatomy comes from a tooth library (`ToothLibraryRegistry`; see [TOOTH_LIBRARIES.md](TOOTH_LIBRARIES.md)) as azimuthal (radius, height) profiles from the height of contour to the axis.
+   * Each margin vertex starts a column. Its profile runs from the margin to the height of contour along an emergence curve (a cubic Bézier), then follows the library profile.
+   * The library profile is taken at the azimuth that lands on the column after anisotropic scaling to the crown's mesial/distal/buccal/lingual half-widths and height. Cusp scaling exaggerates or flattens the relief around the tooth's occlusal level.
+   * **Minimum thickness**: walls are pushed out radially and the occlusal surface vertically. Both supports are dilated by the required thickness: the widest wall within that distance above, the highest point within it inwards. That way the shell also clears the edges of the die.
+   * The radius may not grow again between the contour and the apex, so the pushes cannot fold the surface. Thickness ramps from the margin thickness over the first 1.2 mm.
    * Crown = reversed die faces + shell + centre fan, oriented by the die's margin edge. It is **closed and consistently oriented by construction**, and the tests check this.
 7. **Fitting and contacts**:
    * Neighbour widths come from ray casts at the height of contour against the scan without the preparation. The height is a bisection on the clearance to the antagonist.

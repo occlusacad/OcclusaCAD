@@ -17,6 +17,7 @@ add_library(occlusa_core STATIC
     Uuid.cpp
     Volume.cpp
     Workflow.cpp
+    crown/AnatomyGenerator.cpp
     crown/Bridge.cpp
     crown/CrownBuilder.cpp
     crown/InsertionAxis.cpp

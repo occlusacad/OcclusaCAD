@@ -20,7 +20,7 @@ message("${err}")
 if(NOT rc EQUAL 0)
     message(FATAL_ERROR "OcclusaCAD end-to-end crown design failed (${rc})")
 endif()
-if(NOT err MATCHES "DEMO crown 46: .* watertight")
+if(NOT err MATCHES "DEMO crown 46 \\([^)]*\\): .* watertight")
     message(FATAL_ERROR "The crown was not designed")
 endif()
 file(GLOB crowns ${WORK}/data/cases/*/design/crown_46.stl)
@@ -51,4 +51,26 @@ endif()
 file(GLOB bridges ${WORK}/data/cases/*/design/bridge_35-36-37.stl)
 if(NOT bridges)
     message(FATAL_ERROR "The bridge STL was not saved to the case")
+endif()
+
+# A lab tooth library: exported, turned into a plain STL folder, re-created with occlusa_toothlib
+# and placed in the data folder, then used for the crown on 46.
+execute_process(COMMAND ${TOOTHLIB} export --library occlusacad-young --out ${WORK}/data/libraries/lab-young RESULT_VARIABLE rc)
+if(NOT rc EQUAL 0)
+    message(FATAL_ERROR "occlusa_toothlib export failed (${rc})")
+endif()
+file(REMOVE ${WORK}/data/libraries/lab-young/library.json)
+execute_process(COMMAND ${TOOTHLIB} create --in ${WORK}/data/libraries/lab-young --name "Lab Young" --license "Internal use"
+                RESULT_VARIABLE rc OUTPUT_VARIABLE out)
+if(NOT rc EQUAL 0 OR NOT out MATCHES "with 14 teeth")
+    message(FATAL_ERROR "occlusa_toothlib create failed (${rc}):\n${out}")
+endif()
+string(REGEX MATCH "Created crown demo case [^ ]+ \\(([0-9a-f-]+)\\)" match "${phantom_out}")
+execute_process(COMMAND ${DESIGNER} --data-root ${WORK}/data --case ${CMAKE_MATCH_1}
+                        --demo-crown ${WORK}/phantom/crown/crown_truth.json --demo-library lab-young
+                        --frames 10 --screenshot ${WORK}/library.png
+                RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+message("${err}")
+if(NOT rc EQUAL 0 OR NOT err MATCHES "DEMO crown 46 \\(lab-young\\): .* watertight")
+    message(FATAL_ERROR "The crown was not designed from the imported library (${rc})")
 endif()

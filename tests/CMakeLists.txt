@@ -1,6 +1,7 @@
 add_executable(occlusa_tests
     main.cpp
     test_stl.cpp
+    test_toothlib.cpp
     test_bridge.cpp
     test_crown.cpp
     test_dicom.cpp
@@ -29,6 +30,7 @@ if(OCCLUSACAD_HEADLESS_TESTS AND OCCLUSACAD_BUILD_TOOLS)
         COMMAND ${CMAKE_COMMAND}
             -DPHANTOM=$<TARGET_FILE:occlusa_phantom>
             -DDESIGNER=$<TARGET_FILE:OcclusaCAD>
+            -DTOOTHLIB=$<TARGET_FILE:occlusa_toothlib>
             -DWORK=${CMAKE_CURRENT_BINARY_DIR}/e2e_crown
             -P ${CMAKE_CURRENT_SOURCE_DIR}/DesignerCrownE2E.cmake)
 endif()

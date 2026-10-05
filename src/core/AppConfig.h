@@ -24,6 +24,8 @@ struct AppConfig {
     bool isConfigured() const;
     std::filesystem::path databasePath() const { return dataRoot / "occlusacad.sqlite3"; }
     std::filesystem::path casesRoot() const { return dataRoot / "cases"; }
+    // Tooth libraries shared by the lab (each sub-folder holds a library.json).
+    std::filesystem::path librariesRoot() const { return dataRoot / "libraries"; }
 
     // Location: $OCCLUSACAD_CONFIG if set, else <platform config dir>/config.json.
     static std::filesystem::path defaultPath();

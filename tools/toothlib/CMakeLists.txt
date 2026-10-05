@@ -1,0 +1,3 @@
+add_executable(occlusa_toothlib main.cpp)
+target_link_libraries(occlusa_toothlib PRIVATE occlusa_core)
+occlusa_set_compile_options(occlusa_toothlib)

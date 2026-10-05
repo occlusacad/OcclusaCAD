@@ -36,6 +36,14 @@ int main(int argc, char** argv)
             so.dicomPaths.push_back(p);
     }
     so.startStep = cl.get("step");
+    if (auto v = cl.get("view")) {
+        static const std::pair<const char*, gfx::ViewPreset> presets[] = {{"front", gfx::ViewPreset::Front}, {"back", gfx::ViewPreset::Back},
+                                                                          {"left", gfx::ViewPreset::Left},   {"right", gfx::ViewPreset::Right},
+                                                                          {"top", gfx::ViewPreset::Top},     {"bottom", gfx::ViewPreset::Bottom}};
+        for (const auto& [name, preset] : presets)
+            if (*v == name)
+                so.viewPreset = preset;
+    }
     so.expertMode = cl.has("expert");
     if (auto gt = cl.get("demo-align")) {
         so.demoAutoAlign = true;
@@ -47,6 +55,7 @@ int main(int argc, char** argv)
         so.demoCrownTruth = platform::pathFromUtf8(*c);
     if (auto e = cl.get("demo-max-margin-error"))
         so.demoMaxMarginError = std::stod(*e);
+    so.demoLibrary = cl.get("demo-library").value_or("");
     so.demoSave = cl.has("demo-save");
     if (auto e = cl.get("demo-max-error"))
         so.demoMaxError = std::stod(*e);

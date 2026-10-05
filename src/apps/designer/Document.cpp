@@ -121,7 +121,8 @@ std::optional<glm::dvec3> dvec3FromJson(const json& j, const char* key)
 
 json paramsToJson(const crown::CrownParameters& p)
 {
-    return {{"kind", static_cast<int>(p.kind)},
+    return {{"library", p.library},
+            {"kind", static_cast<int>(p.kind)},
             {"upper", p.upper},
             {"coping", p.coping},
             {"copingThickness", p.copingThickness},
@@ -150,6 +151,7 @@ json paramsToJson(const crown::CrownParameters& p)
 crown::CrownParameters paramsFromJson(const json& j)
 {
     crown::CrownParameters p;
+    p.library = j.value("library", p.library);
     p.kind = static_cast<crown::ToothKind>(std::clamp(j.value("kind", static_cast<int>(p.kind)), 0, 6));
     p.upper = j.value("upper", p.upper);
     p.coping = j.value("coping", p.coping);

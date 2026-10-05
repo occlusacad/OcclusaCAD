@@ -27,6 +27,7 @@ struct DesignerOptions {
     std::vector<std::filesystem::path> dicomPaths; // ad-hoc data from the command line
     std::vector<std::filesystem::path> scanPaths;
     std::optional<std::string> startStep;
+    std::optional<gfx::ViewPreset> viewPreset; // initial 3D view direction (--view)
     bool expertMode = false;
     bool demoAutoAlign = false; // headless demo: run point-pair + ICP alignment automatically
     std::optional<std::filesystem::path> demoGroundTruth;
@@ -34,6 +35,7 @@ struct DesignerOptions {
     double demoMaxError = 0.0;  // > 0: exit with code 3 if the registration error exceeds this (mm)
     std::optional<std::filesystem::path> demoCrownTruth; // headless demo: automatic crown design checked against this
     double demoMaxMarginError = 0.0;
+    std::string demoLibrary;
 };
 
 // OcclusaCAD: the design application (Implant Studio style workflows).

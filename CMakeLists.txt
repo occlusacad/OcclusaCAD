@@ -18,7 +18,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(OCCLUSACAD_BUILD_TESTS "Build unit tests" ON)
-option(OCCLUSACAD_BUILD_TOOLS "Build developer tools (synthetic data generator)" ON)
+option(OCCLUSACAD_BUILD_TOOLS "Build tools (synthetic data generator, tooth library utility)" ON)
 option(OCCLUSACAD_WARNINGS_AS_ERRORS "Treat warnings as errors in first-party code" OFF)
 
 # Put all executables side by side so OcclusaCAD DB can find OcclusaCAD.

@@ -6,6 +6,9 @@
 #include "core/Geometry.h"
 #include "core/Log.h"
 #include "core/crown/InsertionAxis.h"
+#include "core/crown/ToothLibrary.h"
+#include "core/Platform.h"
+#include "ui/FileDialog.h"
 #include "ui/Fonts.h"
 #include "ui/Theme.h"
 #include "ui/Widgets.h"
@@ -1626,6 +1629,8 @@ public:
         ImGui::Spacing();
         ui::beginCard("##crown");
         ui::subheading(r->isPontic() ? "Pontic" : "Crown");
+        if (drawLibraryPicker(app, *r))
+            geometryChanged = true;
         int kind = static_cast<int>(r->params.kind);
         ImGui::SetNextItemWidth(full);
         if (ImGui::BeginCombo("##kind", crown::toothTemplate(r->params.kind, r->params.upper).name)) {
@@ -1669,12 +1674,13 @@ public:
             if (ImGui::IsItemActivated())
                 pushUndo(*r);
         };
-        const crown::ToothTemplate& tpl = crown::toothTemplate(r->params.kind, r->params.upper);
-        slider("##h", r->params.crownHeight, tpl.crownHeight, 3.0f, 14.0f, "Height  %.2f mm");
-        slider("##hm", r->params.halfMesial, tpl.mesioDistal * 0.5, 2.0f, 8.0f, "Mesial  %.2f mm");
-        slider("##hd", r->params.halfDistal, tpl.mesioDistal * 0.5, 2.0f, 8.0f, "Distal  %.2f mm");
-        slider("##hb", r->params.halfBuccal, tpl.buccoLingual * 0.5, 2.0f, 8.0f, "Buccal  %.2f mm");
-        slider("##hl", r->params.halfLingual, tpl.buccoLingual * 0.5, 2.0f, 8.0f, "Lingual  %.2f mm");
+        // Unset sizes show the library tooth's own dimensions.
+        const auto libShape = crown::toothShape(r->params.library, r->params.kind, r->params.upper);
+        slider("##h", r->params.crownHeight, libShape->height, 3.0f, 14.0f, "Height  %.2f mm");
+        slider("##hm", r->params.halfMesial, libShape->halfMesial, 2.0f, 8.0f, "Mesial  %.2f mm");
+        slider("##hd", r->params.halfDistal, libShape->halfDistal, 2.0f, 8.0f, "Distal  %.2f mm");
+        slider("##hb", r->params.halfBuccal, libShape->halfBuccal, 2.0f, 8.0f, "Buccal  %.2f mm");
+        slider("##hl", r->params.halfLingual, libShape->halfLingual, 2.0f, 8.0f, "Lingual  %.2f mm");
         auto sliderSigned = [&](const char* id, double& value, float lo, float hi, const char* fmt) {
             float v = static_cast<float>(value);
             ImGui::SetNextItemWidth(full);
@@ -1840,7 +1846,7 @@ public:
             r->crown.reset();
         }
         if ((geometryChanged || baseChanged) && !busy) {
-            if (r->params.kind != before.kind || r->params.coping != before.coping)
+            if (r->params.kind != before.kind || r->params.coping != before.coping || r->params.library != before.library)
                 r->displacement.clear();
             regenerate(app, *r, distanceMap_);
             app.markModified();
@@ -1915,6 +1921,80 @@ public:
     }
 
 private:
+    // Tooth library choice and import. Returns true when the library changed.
+    bool drawLibraryPicker(DesignerApp& app, RestorationDesign& r)
+    {
+        auto& registry = crown::ToothLibraryRegistry::instance();
+        const auto libs = registry.libraries();
+        const std::string current = r.params.library.empty() ? crown::ToothLibraryRegistry::kDefaultLibrary : r.params.library;
+        const auto info = registry.find(current);
+        bool changed = false;
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::BeginCombo("##library", info ? info->name.c_str() : current.c_str())) {
+            for (const auto& lib : libs) {
+                const std::string label = lib.builtIn ? lib.name : lib.name + "  (" + lib.license + ")";
+                if (ImGui::Selectable(std::format("{}##{}", label, lib.id).c_str(), lib.id == current)) {
+                    if (lib.id != current) {
+                        pushUndo(r);
+                        r.params.library = lib.id;
+                        r.params.crownHeight = 0.0;
+                        r.params.halfMesial = r.params.halfDistal = r.params.halfBuccal = r.params.halfLingual = 0.0;
+                        changed = true;
+                    }
+                }
+                if (ImGui::IsItemHovered() && !lib.description.empty())
+                    ImGui::SetTooltip("%s", lib.description.c_str());
+            }
+            ImGui::EndCombo();
+        }
+        if (info && !info->builtIn) {
+            bool has = false;
+            for (int t : info->teeth)
+                has |= dental::isUpper(t) == r.params.upper && t % 10 == crown::fdiPosition(r.params.kind);
+            if (!has)
+                ui::mutedText("No %s in this library: the default is used.", std::string(crown::toString(r.params.kind)).c_str());
+            if (!info->author.empty() || !info->license.empty())
+                ui::mutedText("%s%s%s", info->author.c_str(), info->author.empty() || info->license.empty() ? "" : "  -  ", info->license.c_str());
+        }
+        if (ui::button("Import library...", ImVec2(-FLT_MIN, 0), !app.headless() && !app.tasks().busy()))
+            if (auto folder = ui::dialogs::pickFolder())
+                if (auto id = importLibrary(app, *folder)) {
+                    pushUndo(r);
+                    r.params.library = *id;
+                    changed = true;
+                }
+        return changed;
+    }
+
+    // Copy a library folder into the lab's shared libraries (or the user's own without a data folder).
+    // A folder without library.json is accepted when its STL files are named by FDI number and
+    // already in the tooth frame.
+    std::optional<std::string> importLibrary(DesignerApp& app, const std::filesystem::path& source)
+    {
+        try {
+            crown::ToothLibraryManifest m = std::filesystem::exists(source / "library.json")
+                                                ? crown::readToothLibraryManifest(source)
+                                                : crown::manifestFromStlFolder(source, platform::pathToUtf8(source.filename()));
+            const std::filesystem::path root = app.config().dataRoot.empty() ? platform::configDir() / "libraries" : app.config().librariesRoot();
+            const std::filesystem::path dest = root / platform::pathFromUtf8(m.id);
+            std::filesystem::create_directories(dest);
+            for (const auto& t : m.teeth)
+                std::filesystem::copy_file(source / platform::pathFromUtf8(t.file), dest / platform::pathFromUtf8(t.file),
+                                           std::filesystem::copy_options::overwrite_existing);
+            crown::writeToothLibraryManifest(dest, m);
+            // Check every tooth before offering the library.
+            for (const auto& t : m.teeth)
+                crown::sampleToothShape(crown::loadLibraryTooth(dest, t), t.cervicalZ);
+            const std::string id = crown::ToothLibraryRegistry::instance().addFolder(dest);
+            ui::toast(ui::ToastKind::Success, std::format("Tooth library \"{}\" imported ({} teeth)", m.name, m.teeth.size()));
+            log::info("Tooth library {} imported to {}", m.name, platform::pathToUtf8(dest));
+            return id;
+        } catch (const std::exception& e) {
+            ui::showError("Import tooth library", e.what());
+            return std::nullopt;
+        }
+    }
+
     void drawBridgeCard(DesignerApp& app, BridgeDesign& b, bool busy)
     {
         const ui::Palette& pal = ui::palette();
@@ -2553,6 +2633,14 @@ bool runCrownDemo(DesignerApp& app, CrownDemo& demo)
             if (pr.axis)
                 log::info("DEMO insertion axis of {} deviates {:.1f} deg from the preparation axis", pr.tooth, crown::axisDivergence(*pr.axis, *u->insertionAxis));
         }
+        if (!demo.library.empty())
+            for (auto& u : doc.restorations) {
+                if (!crown::ToothLibraryRegistry::instance().find(demo.library)) {
+                    log::error("DEMO unknown tooth library {}", demo.library);
+                    return finish(2);
+                }
+                u.params.library = demo.library;
+            }
         app.goToStep(StepId::CrownDesign); // starts the automatic design
         demo.state = 4;
         demo.waitFrames = 3;
@@ -2565,8 +2653,9 @@ bool runCrownDemo(DesignerApp& app, CrownDemo& demo)
                 log::error("DEMO design of tooth {} failed: {}", u.tooth, u.dieError);
                 return finish(3);
             }
-            log::info("DEMO {} {}: {} triangles, volume {:.0f} mm3, min thickness {:.2f} mm, {}", u.isPontic() ? "pontic" : "crown", u.tooth,
-                      u.crown->mesh.triangleCount(), u.crown->volume, u.crown->minThickness, u.crown->watertight ? "watertight" : "NOT watertight");
+            log::info("DEMO {} {} ({}): {} triangles, volume {:.0f} mm3, min thickness {:.2f} mm, {}", u.isPontic() ? "pontic" : "crown", u.tooth,
+                      u.params.library.empty() ? crown::ToothLibraryRegistry::kDefaultLibrary : u.params.library, u.crown->mesh.triangleCount(),
+                      u.crown->volume, u.crown->minThickness, u.crown->watertight ? "watertight" : "NOT watertight");
             if (!u.crown->watertight)
                 return finish(3);
         }

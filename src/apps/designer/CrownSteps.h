@@ -44,6 +44,7 @@ struct CrownDemo {
     int state = 0;
     int waitFrames = 0;
     std::size_t index = 0; // preparation being processed
+    std::string library;   // tooth library for the designed restorations (empty = default)
 };
 bool runCrownDemo(DesignerApp& app, CrownDemo& demo);
 

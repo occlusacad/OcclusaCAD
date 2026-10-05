@@ -52,6 +52,11 @@ DesignerApp::~DesignerApp() = default;
 void DesignerApp::onStart()
 {
     renderer_ = std::make_unique<gfx::SceneRenderer>();
+    // Tooth libraries: the lab's shared folder and the user's own.
+    auto& libraries = crown::ToothLibraryRegistry::instance();
+    if (!config_.dataRoot.empty())
+        libraries.scanDirectory(config_.librariesRoot());
+    libraries.scanDirectory(platform::configDir() / "libraries");
     if (!headless())
         ui::dialogs::init();
     expert_ = designerOptions_.expertMode;
@@ -79,6 +84,7 @@ void DesignerApp::onStart()
         d.truthFile = *designerOptions_.demoCrownTruth;
         d.maxMarginError = designerOptions_.demoMaxMarginError;
         d.save = designerOptions_.demoSave;
+        d.library = designerOptions_.demoLibrary;
         crownDemo_ = d;
     }
 
@@ -95,6 +101,8 @@ void DesignerApp::onStart()
         if (auto s = workflow::stepFromKey(*designerOptions_.startStep))
             start = *s;
     current_ = start;
+    if (designerOptions_.viewPreset)
+        main3D_.setPreset(*designerOptions_.viewPreset);
     step(current_).onEnter(*this);
     layout_ = step(current_).preferredLayout();
 }

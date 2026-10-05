@@ -371,6 +371,46 @@ TEST_CASE("Crown occlusal surface does not fold, even when it sits low over the 
     low.crownHeight = params.crownHeight - 1.5; // occlusal surface down at the preparation top
     const CrownMesh lowCrown = buildCrown(base, low, {});
     CHECK(badFaces(lowCrown) == 0);
-    CHECK(lowCrown.thickenedVertices > 0);
+    CHECK(lowCrown.minThickness > 0.45); // the shell clears the preparation even with the anatomy pushed down
     CHECK(lowCrown.watertight);
+}
+
+
+TEST_CASE("Every built-in library tooth gives a closed crown without folds")
+{
+    const Fixture& f = fixture();
+    const PrepScan prep(f.scan);
+    const glm::vec3 click(transformPoint(f.toScan, glm::dvec3(0.0, 0.0, 4.5)));
+    const auto det = detectMargin(prep, click);
+    REQUIRE(det);
+    auto die = extractDie(prep, det->line, click);
+    REQUIRE(die);
+    CrownFrame frame;
+    frame.origin = centroid(det->line.points(*f.scan));
+    frame.axis = det->occlusalDirection;
+    estimateToothOrientation(*f.scan, det->line.points(*f.scan), frame);
+    const CrownBase base = makeCrownBase(*die, frame, CrownParameters{});
+    for (const char* lib : {"occlusacad-natural", "occlusacad-young", "occlusacad-mature"})
+        for (bool upper : {false, true})
+            for (int k = 0; k < 7; ++k) {
+                CrownParameters p;
+                p.library = lib;
+                p.kind = static_cast<ToothKind>(k);
+                p.upper = upper;
+                const CrownMesh c = buildCrown(base, p);
+                INFO(lib << " " << (upper ? "upper " : "lower ") << toString(p.kind));
+                CHECK(c.watertight);
+                CHECK(c.volume > 50.0);
+                CHECK(c.minThickness > 0.45);
+                int flipped = 0;
+                for (std::size_t t = 0; t < c.mesh.indices.size(); t += 3) {
+                    const auto a = c.mesh.indices[t], b = c.mesh.indices[t + 1], d = c.mesh.indices[t + 2];
+                    if (a < c.outerBegin || b < c.outerBegin || d < c.outerBegin)
+                        continue;
+                    const glm::vec3 n = glm::cross(c.mesh.positions[b] - c.mesh.positions[a], c.mesh.positions[d] - c.mesh.positions[a]);
+                    const glm::vec3 n0 = glm::cross(c.basePositions[b] - c.basePositions[a], c.basePositions[d] - c.basePositions[a]);
+                    flipped += glm::dot(n, n0) < 0.0f ? 1 : 0;
+                }
+                CHECK(flipped == 0);
+            }
 }
