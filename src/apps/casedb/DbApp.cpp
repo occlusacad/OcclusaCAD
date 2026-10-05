@@ -317,6 +317,9 @@ void DbApp::launchDesigner()
     std::vector<std::string> args = {"--case", draft_.uuid};
     if (configPath_ != AppConfig::defaultPath())
         args.insert(args.end(), {"--config", platform::pathToUtf8(configPath_)});
+    // The data folder may come from the command line (--data-root) rather than the saved settings.
+    if (!config_.dataRoot.empty())
+        args.insert(args.end(), {"--data-root", platform::pathToUtf8(config_.dataRoot)});
     std::string error;
     if (!platform::launchDetached(exe, args, &error)) {
         ui::showError("Design", "Could not start OcclusaCAD: " + error);

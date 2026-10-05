@@ -71,6 +71,8 @@ Both run on **Windows, macOS and Linux** and support **light and dark mode** (fo
 
 ## Building
 
+**Linux and macOS, quickest:** `./build.sh --demo --run` checks the dependencies (and prints the install command for Arch, Debian/Ubuntu, Fedora or openSUSE if something is missing), builds into `build/`, creates the demo cases in `~/OcclusaCAD-demo` and starts OcclusaCAD DB on them. Other options: `--test`, `--e2e`, `--debug`, `--clean`, `--check`; see `./build.sh --help`.
+
 Requirements: CMake ≥ 3.21 and a C++20 compiler with `<format>` (GCC 13+, Clang 17+, Visual Studio 2022, Xcode 15+ / macOS 13.3+). All other dependencies are vendored in `third_party/`, so the build needs no network access.
 
 ```bash
@@ -81,7 +83,9 @@ ctest --test-dir build --output-on-failure
 
 Executables land in `build/bin/` (`build/bin/<Config>/` with Visual Studio). OcclusaCAD DB looks for `OcclusaCAD` next to itself.
 
-**Linux packages** (Debian/Ubuntu names): `pkg-config libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev libdbus-1-dev libgl-dev libegl-dev`. File dialogs use the XDG desktop portal over D-Bus, so GTK is not needed.
+**Linux packages**:
+- Arch: `base-devel cmake ninja pkgconf wayland wayland-protocols libxkbcommon libx11 libxrandr libxinerama libxcursor libxi dbus mesa libglvnd`
+- Debian/Ubuntu: `build-essential cmake ninja-build pkg-config libwayland-dev libxkbcommon-dev wayland-protocols xorg-dev libdbus-1-dev libgl-dev libegl-dev` File dialogs use the XDG desktop portal over D-Bus, so GTK is not needed.
 
 **Windows**: open the folder in Visual Studio 2022 (CMake project), or use the commands above from a Developer Prompt.
 
