@@ -12,6 +12,9 @@
 #include <GLFW/glfw3native.h>
 #include <dwmapi.h>
 #endif
+#if defined(OCCLUSACAD_HAVE_WAYLAND)
+#include <wayland-client.h>
+#endif
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -26,6 +29,7 @@
 #include <chrono>
 #include <thread>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 namespace occlusa::ui {
@@ -38,6 +42,30 @@ void onGlfwError(int code, const char* description)
 {
     log::error("GLFW error {}: {}", code, description ? description : "");
 }
+
+#if defined(OCCLUSACAD_HAVE_WAYLAND)
+// True when a Wayland compositor is running that draws window decorations itself (xdg-decoration).
+bool compositorHasServerDecorations()
+{
+    wl_display* display = wl_display_connect(nullptr);
+    if (!display)
+        return false;
+    static const wl_registry_listener listener = {
+        [](void* found, wl_registry*, uint32_t, const char* interface, uint32_t) {
+            if (std::strcmp(interface, "zxdg_decoration_manager_v1") == 0)
+                *static_cast<bool*>(found) = true;
+        },
+        [](void*, wl_registry*, uint32_t) {},
+    };
+    bool found = false;
+    wl_registry* registry = wl_display_get_registry(display);
+    wl_registry_add_listener(registry, &listener, &found);
+    wl_display_roundtrip(display);
+    wl_registry_destroy(registry);
+    wl_display_disconnect(display);
+    return found;
+}
+#endif
 
 void activityCursor(GLFWwindow*, double, double) { notifyActivity(); }
 void activityButton(GLFWwindow*, int, int, int) { notifyActivity(); }
@@ -104,6 +132,13 @@ float GuiApp::detectScale() const
 bool GuiApp::initWindowed()
 {
     glfwSetErrorCallback(onGlfwError);
+#if defined(OCCLUSACAD_HAVE_WAYLAND)
+    // libdecor's GTK plugin initialises GTK, which opens a second Wayland connection, even on
+    // compositors that draw the decorations themselves (Hyprland, KDE, Sway). Use libdecor only
+    // where the client must draw them (GNOME, Weston); elsewhere GLFW asks for server-side ones.
+    if (!std::getenv("LIBDECOR_FORCE_CSD") && compositorHasServerDecorations())
+        glfwInitHint(GLFW_WAYLAND_LIBDECOR, GLFW_WAYLAND_DISABLE_LIBDECOR);
+#endif
     if (!glfwInit()) {
         log::error("Failed to initialise GLFW");
         return false;
