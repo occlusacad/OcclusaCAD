@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ui/FramePacer.h"
 #include "ui/Theme.h"
 
 #include <filesystem>
@@ -73,6 +74,7 @@ private:
     bool dark_ = true;
     float scale_ = 1.0f;
     int redrawFrames_ = 3;
+    FramePacer pacer_{1.0 / 60.0};
     int frameIndex_ = 0;
     int exitCode_ = 0;
     std::string iniPath_;

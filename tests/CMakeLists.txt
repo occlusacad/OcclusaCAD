@@ -9,6 +9,7 @@ add_executable(occlusa_tests
     test_isosurface.cpp
     test_workflow.cpp
     test_db.cpp
+    test_framepacer.cpp
 )
 target_link_libraries(occlusa_tests PRIVATE occlusa_core occlusa_db occlusa_doctest)
 occlusa_set_compile_options(occlusa_tests)

@@ -122,7 +122,16 @@ bool GuiApp::initWindowed()
         return false;
     }
     glfwMakeContextCurrent(window_);
-    glfwSwapInterval(1);
+    // On Wayland, a vsynced eglSwapBuffers waits for the compositor's frame callback, and
+    // compositors send none while the window is hidden (e.g. on another workspace). The main
+    // thread would block and stop answering pings ("not responding"). FramePacer limits the
+    // frame rate instead.
+    glfwSwapInterval(glfwGetPlatform() == GLFW_PLATFORM_WAYLAND ? 0 : 1);
+    if (GLFWmonitor* monitor = glfwGetPrimaryMonitor()) {
+        const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+        if (mode && mode->refreshRate > 0)
+            pacer_.setMinFrameInterval(1.0 / mode->refreshRate);
+    }
     if (!gfx::loadGL(reinterpret_cast<gfx::GLLoadProc>(glfwGetProcAddress))) {
         log::error("OpenGL 3.3 is required");
         return false;
@@ -298,11 +307,12 @@ int GuiApp::run()
 
     int lastActivity = -1;
     while (!quitRequested_) {
-        // Sleep until input arrives unless something asked for continuous redraws.
-        if (redrawFrames_ > 0)
-            glfwPollEvents();
+        // Sleep until input arrives or the next frame is due.
+        const double timeout = pacer_.waitTimeout(glfwGetTime(), redrawFrames_ > 0);
+        if (timeout > 0.0)
+            glfwWaitEventsTimeout(timeout);
         else
-            glfwWaitEventsTimeout(0.5);
+            glfwPollEvents();
         const int activity = gActivity.load();
         if (activity != lastActivity) {
             lastActivity = activity;
@@ -322,7 +332,12 @@ int GuiApp::run()
             glfwWaitEventsTimeout(0.2);
             continue;
         }
+        // Waits can return without a reason to draw (Wayland wakes the loop after every frame).
+        const double now = glfwGetTime();
+        if (!pacer_.frameDue(now, redrawFrames_ > 0))
+            continue;
         frame();
+        pacer_.frameDrawn(now);
         if (redrawFrames_ > 0)
             --redrawFrames_;
     }
