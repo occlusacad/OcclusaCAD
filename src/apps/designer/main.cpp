@@ -62,6 +62,7 @@ int main(int argc, char** argv)
 
     ui::AppOptions options;
     options.title = "OcclusaCAD";
+    options.appId = "org.occlusacad.OcclusaCAD";
     options.width = 1720;
     options.height = 1040;
     options.iniFileName = "designer.ini";

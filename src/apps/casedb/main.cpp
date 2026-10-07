@@ -20,6 +20,7 @@ int main(int argc, char** argv)
 
     ui::AppOptions options;
     options.title = "OcclusaCAD DB";
+    options.appId = "org.occlusacad.OcclusaCADDB";
     options.width = 1500;
     options.height = 940;
     options.iniFileName = "casedb.ini";

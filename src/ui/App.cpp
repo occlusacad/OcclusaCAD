@@ -150,6 +150,13 @@ bool GuiApp::initWindowed()
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
     glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_TRUE);
     glfwWindowHint(GLFW_SAMPLES, 0);
+    if (!options_.appId.empty()) {
+        // Without these, Wayland gets an empty app_id and X11 uses the (changing) title as WM_CLASS.
+        const std::string instance = options_.appId.substr(options_.appId.rfind('.') + 1);
+        glfwWindowHintString(GLFW_WAYLAND_APP_ID, options_.appId.c_str());
+        glfwWindowHintString(GLFW_X11_CLASS_NAME, options_.appId.c_str());
+        glfwWindowHintString(GLFW_X11_INSTANCE_NAME, instance.c_str());
+    }
     window_ = glfwCreateWindow(options_.width, options_.height, options_.title.c_str(), nullptr, nullptr);
     if (!window_) {
         log::error("Failed to create a window with an OpenGL 3.3 core context");

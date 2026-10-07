@@ -13,6 +13,9 @@ namespace occlusa::ui {
 
 struct AppOptions {
     std::string title = "OcclusaCAD";
+    // Reverse-DNS application ID: the Wayland app_id and the X11 WM_CLASS class. It should match
+    // the basename of the application's .desktop file.
+    std::string appId;
     int width = 1600;
     int height = 1000;
     std::string iniFileName = "imgui.ini";  // stored in the user config directory
