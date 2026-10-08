@@ -694,8 +694,8 @@ void DesignerApp::onFrame()
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings |
                      ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoNavFocus);
     ImGui::PopStyleVar(3);
-    // v2: 25% / 50% / 25% default (a new id so layouts saved by older versions are replaced).
-    const ImGuiID dockId = ImGui::GetID("OcclusaDock.v2");
+    // v3: 25% / 50% / 25% default (a new id so layouts saved by older versions are replaced).
+    const ImGuiID dockId = ImGui::GetID("OcclusaDock.v3");
     const ImVec2 dockSize = ImGui::GetContentRegionAvail();
     if (firstFrame_ || resetLayout_) {
         ImGuiDockNode* node = ImGui::DockBuilderGetNode(dockId);
@@ -763,13 +763,24 @@ void DesignerApp::onFrame()
     firstFrame_ = false;
 }
 
+// Whether node is or contains the central node. ImGui's own flags (MergedFlags, HasCentralNodeChild)
+// are only filled in by the first DockSpace() call, so a layout just loaded from the ini lacks them.
+static bool containsCentralNode(const ImGuiDockNode* node)
+{
+    if (!node)
+        return false;
+    if ((node->LocalFlags | node->MergedFlags) & ImGuiDockNodeFlags_CentralNode)
+        return true;
+    return containsCentralNode(node->ChildNodes[0]) || containsCentralNode(node->ChildNodes[1]);
+}
+
 // Scales the width of every node beside the central one (the sidebars) along horizontal splits.
 static void scaleSideNodes(ImGuiDockNode* node, float scale)
 {
     if (!node || !node->IsSplitNode())
         return;
     for (ImGuiDockNode* child : node->ChildNodes) {
-        if (child->IsCentralNode() || child->HasCentralNodeChild)
+        if (containsCentralNode(child))
             scaleSideNodes(child, scale);
         else if (node->SplitAxis == ImGuiAxis_X) {
             child->SizeRef.x *= scale;
