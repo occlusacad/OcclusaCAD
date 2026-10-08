@@ -1,6 +1,7 @@
 #pragma once
 
 #include "apps/designer/CrownDesign.h"
+#include "core/Dental.h"
 #include "core/Mesh.h"
 #include "core/Registration.h"
 #include "core/Volume.h"
@@ -174,6 +175,9 @@ struct DesignState {
     glm::dvec3 cursor{0.0};
     std::vector<SavedRestoration> restorations;
     std::vector<SavedBridge> bridges;
+    // Tooth numbering of the saved file (the saving user's setting). In memory teeth are FDI;
+    // toJson writes them in this system and fromJson converts back.
+    dental::Numbering numbering = dental::Numbering::FDI;
 
     std::string toJson() const;
     static DesignState fromJson(const std::string& json);

@@ -28,6 +28,9 @@ public:
 
     virtual void onEnter(DesignerApp&) {}
     virtual void onLeave(DesignerApp&) {}
+    // Every frame while the step is current, whether or not its panel is shown (the steps
+    // panel can be hidden): background work, preparing views, starting automatic design.
+    virtual void update(DesignerApp&) {}
     virtual void drawPanel(DesignerApp& app) = 0;
     // Reason the wizard cannot advance yet (nullopt = ready).
     virtual std::optional<std::string> blocker(const DesignerApp&) const { return std::nullopt; }

@@ -88,6 +88,11 @@ RestorationDesign* findRestoration(DesignerApp& app, int tooth)
     return nullptr;
 }
 
+std::string bridgeName(const DesignerApp& app, const BridgeDesign& b)
+{
+    return dental::toothList(b.teeth, app.numbering(), "-");
+}
+
 void initParams(RestorationDesign& r)
 {
     r.params.kind = crown::toothKindFromFdi(r.tooth);
@@ -624,7 +629,7 @@ struct UnitSnapshot {
 // below the lower of the two crowns' cusp tips, then the technician's edits. `warnings` gets one
 // entry per connector (empty when it fits).
 std::vector<crown::ConnectorSpec> placeConnectors(const std::vector<UnitSnapshot>& units, const glm::dvec3& A, const BridgeDesign& b,
-                                                  std::vector<std::string>& warnings)
+                                                  std::vector<std::string>& warnings, dental::Numbering numbering)
 {
     warnings.clear();
     std::vector<crown::ConnectorSpec> out;
@@ -652,7 +657,8 @@ std::vector<crown::ConnectorSpec> placeConnectors(const std::vector<UnitSnapshot
                                                           b.connectorHeightRatio);
         spec = crown::applyConnectorEdit(spec, b.editAt(i));
         const auto fit = crown::checkConnectorFit(spec, ref, bottom, top);
-        warnings.push_back(fit ? std::format("Connector {}-{} {}.", a.tooth, c.tooth, *fit) : std::string());
+        warnings.push_back(fit ? std::format("Connector {}-{} {}.", dental::toothLabel(a.tooth, numbering), dental::toothLabel(c.tooth, numbering), *fit)
+                               : std::string());
         out.push_back(spec);
     }
     return out;
@@ -714,7 +720,7 @@ void bridgeChanged(DesignerApp& app, BridgeDesign& b)
     b.result.reset();
     b.warnings.clear();
     const auto units = bridgeUnits(app, b);
-    b.connectors = (units.empty() || !b.axis) ? std::vector<crown::ConnectorSpec>{} : placeConnectors(units, *b.axis, b, b.warnings);
+    b.connectors = (units.empty() || !b.axis) ? std::vector<crown::ConnectorSpec>{} : placeConnectors(units, *b.axis, b, b.warnings, app.numbering());
     updateConnectorOverlays(app, b);
 }
 
@@ -783,7 +789,7 @@ void startMarginDetection(DesignerApp& app, int tooth, const glm::vec3& local)
                 return;
             if (!det) {
                 ui::toast(ui::ToastKind::Warning, err);
-                log::warn("Margin detection failed for tooth {}: {}", tooth, err);
+                log::warn("Margin detection failed for tooth {}: {}", app.toothText(tooth), err);
                 return;
             }
             r->controls = det->controls;
@@ -796,7 +802,7 @@ void startMarginDetection(DesignerApp& app, int tooth, const glm::vec3& local)
             if (!r->dieError.empty())
                 ui::toast(ui::ToastKind::Warning, r->dieError);
             if (ScanObject* s = scanById(app, r->prepScanId))
-                log::info("Margin of tooth {} detected: {} points, {:.1f} mm", tooth, r->margin.vertices.size(),
+                log::info("Margin of tooth {} detected: {} points, {:.1f} mm", app.toothText(tooth), r->margin.vertices.size(),
                           crown::polylineLength(r->margin.points(*s->mesh), true));
         };
     });
@@ -840,7 +846,7 @@ void startAutoDesign(DesignerApp& app, int tooth, bool distanceMap)
             r->crownGenerated = true;
             updateCrownOverlay(app, *r, distanceMap);
             app.markModified();
-            log::info("Crown {} designed: {:.0f} mm3, min. thickness {:.2f} mm{}", tooth, c->volume, c->minThickness, c->watertight ? "" : " (not watertight)");
+            log::info("Crown {} designed: {:.0f} mm3, min. thickness {:.2f} mm{}", app.toothText(tooth), c->volume, c->minThickness, c->watertight ? "" : " (not watertight)");
         };
     });
 }
@@ -860,7 +866,7 @@ void startBridgeAutoDesign(DesignerApp& app, BridgeDesign& b, bool distanceMap)
     for (int t : b.teeth) {
         RestorationDesign* u = findRestoration(app, t);
         if (!u || !ensureBase(app, *u)) {
-            ui::toast(ui::ToastKind::Warning, std::format("Bridge {}: tooth {} is not ready ({}).", b.label(), t,
+            ui::toast(ui::ToastKind::Warning, std::format("Bridge {}: tooth {} is not ready ({}).", bridgeName(app, b), app.toothText(t),
                                                           u && !u->dieError.empty() ? u->dieError : "margin and axis missing"));
             return;
         }
@@ -870,7 +876,8 @@ void startBridgeAutoDesign(DesignerApp& app, BridgeDesign& b, bool distanceMap)
         p.rotationDeg = 0.0;
         units.push_back({t, u->isPontic(), u->base, u->contacts, p});
     }
-    const std::string label = b.label();
+    const std::string label = bridgeName(app, b);
+    const dental::Numbering numbering = app.numbering();
     const BridgeDesign settings = [&] {
         BridgeDesign s;
         s.teeth = b.teeth;
@@ -881,7 +888,7 @@ void startBridgeAutoDesign(DesignerApp& app, BridgeDesign& b, bool distanceMap)
         return s;
     }();
     const glm::dvec3 axis = *b.axis;
-    app.tasks().start("Designing bridge " + label, [&app, units, settings, axis, label, distanceMap](const ProgressFn& progress) mutable
+    app.tasks().start("Designing bridge " + label, [&app, units, settings, axis, label, distanceMap, numbering](const ProgressFn& progress) mutable
                       -> ui::TaskRunner::Continuation {
         reportProgress(progress, 0.05f, "Fitting the units");
         for (auto& u : units)
@@ -904,7 +911,7 @@ void startBridgeAutoDesign(DesignerApp& app, BridgeDesign& b, bool distanceMap)
         }
         reportProgress(progress, 0.8f, "Connectors and merging");
         std::vector<std::string> warnings;
-        auto connectors = placeConnectors(snaps, axis, settings, warnings);
+        auto connectors = placeConnectors(snaps, axis, settings, warnings, numbering);
         auto merged = mergeBridge(snaps, connectors);
         return [&app, units, disp, snaps, connectors, merged, warnings, label, distanceMap] {
             for (std::size_t i = 0; i < units.size(); ++i) {
@@ -948,7 +955,7 @@ void startBridgeMerge(DesignerApp& app, BridgeDesign& b)
     if (units.empty())
         return;
     auto connectors = b.connectors;
-    const std::string label = b.label();
+    const std::string label = bridgeName(app, b);
     const int firstTooth = b.teeth.front();
     app.tasks().start("Merging bridge " + label, [&app, units, connectors, firstTooth](const ProgressFn& progress) -> ui::TaskRunner::Continuation {
         reportProgress(progress, 0.2f, "Joining units and connectors");
@@ -972,10 +979,10 @@ void drawHint(ImDrawList* dl, const Projector& proj, const char* text)
     dl->AddText(pos, IM_COL32(240, 242, 245, 255), text);
 }
 
-std::string restorationLabel(const RestorationDesign& r)
+std::string restorationLabel(const DesignerApp& app, const RestorationDesign& r)
 {
     const auto* t = dental::findRestorationType(r.type);
-    return std::format("{}  {}", r.tooth, t ? t->label : r.type.c_str());
+    return std::format("{}  {}", app.toothText(r.tooth), t ? t->label : r.type.c_str());
 }
 
 // Restoration picker plus scan assignment. Returns true when the active restoration changed.
@@ -989,10 +996,14 @@ bool drawRestorationCard(DesignerApp& app, bool showScans)
     if (doc.restorations.empty()) {
         ui::wrappedMutedText(app.caseMode() ? "The case has no crowns or copings. Add a tooth to design one."
                                             : "No case is open. Choose the tooth to design.");
-        static int fdi = 36;
+        static int number = 0;
         static int typeIdx = 0;
+        const bool universal = app.numbering() == dental::Numbering::Universal;
+        if (number == 0)
+            number = universal ? 19 : 36;
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 4.5f);
-        ImGui::InputInt("FDI tooth", &fdi, 0, 0);
+        ImGui::InputInt(universal ? "Tooth (Universal)" : "Tooth (FDI)", &number, 0, 0);
+        const int fdi = dental::parseTooth(number, app.numbering());
         ImGui::SetNextItemWidth(-FLT_MIN);
         ui::segmented("newtype", {"Anatomic crown", "Coping"}, typeIdx);
         if (ui::primaryButton("Add restoration", ImVec2(-FLT_MIN, 0), dental::isValidFdi(fdi))) {
@@ -1010,12 +1021,12 @@ bool drawRestorationCard(DesignerApp& app, bool showScans)
     }
     RestorationDesign* act = doc.active();
     ImGui::SetNextItemWidth(-FLT_MIN);
-    if (ImGui::BeginCombo("##rest", act ? restorationLabel(*act).c_str() : "")) {
+    if (ImGui::BeginCombo("##rest", act ? restorationLabel(app, *act).c_str() : "")) {
         for (std::size_t i = 0; i < doc.restorations.size(); ++i) {
             const auto& r = doc.restorations[i];
-            std::string label = restorationLabel(r);
+            std::string label = restorationLabel(app, r);
             if (const BridgeDesign* b = doc.bridgeOf(r.tooth))
-                label += "  (bridge " + b->label() + ")";
+                label += "  (bridge " + bridgeName(app, *b) + ")";
             if (!r.supported())
                 label += "  (not supported yet)";
             else if (r.crownGenerated)
@@ -1033,7 +1044,7 @@ bool drawRestorationCard(DesignerApp& app, bool showScans)
     if (act) {
         ui::mutedText("%s", dental::toothName(act->tooth).c_str());
         if (const BridgeDesign* b = doc.bridgeOf(act->tooth))
-            ui::mutedText("Part of bridge %s (%zu units)", b->label().c_str(), b->teeth.size());
+            ui::mutedText("Part of bridge %s (%zu units)", bridgeName(app, *b).c_str(), b->teeth.size());
         if (!act->supported()) {
             ImGui::Spacing();
             ImGui::TextColored(pal.warning, "This restoration type is not designed in this version.");
@@ -1099,24 +1110,24 @@ std::optional<std::string> firstMissing(const DesignerApp& appC, bool needMargin
             continue;
         if (r.isPontic()) {
             if (!doc.bridgeOf(r.tooth))
-                return std::format("Pontic {} needs a crown on a neighbouring tooth (bridge abutment).", r.tooth);
+                return std::format("Pontic {} needs a crown on a neighbouring tooth (bridge abutment).", app.toothText(r.tooth));
             if (needCrown && !r.crownGenerated)
-                return std::format("Design pontic {}.", r.tooth);
+                return std::format("Design pontic {}.", app.toothText(r.tooth));
             continue;
         }
         if (needMargin && !r.marginClosed())
-            return std::format("Define the margin line of tooth {}.", r.tooth);
+            return std::format("Define the margin line of tooth {}.", app.toothText(r.tooth));
         if (needMargin && !r.dieError.empty())
-            return std::format("Tooth {}: {}", r.tooth, r.dieError);
+            return std::format("Tooth {}: {}", app.toothText(r.tooth), r.dieError);
         if (needAxis && !r.insertionAxis)
-            return std::format("Set the insertion axis of tooth {}.", r.tooth);
+            return std::format("Set the insertion axis of tooth {}.", app.toothText(r.tooth));
         if (needCrown && !r.crownGenerated)
-            return std::format("Design the crown of tooth {}.", r.tooth);
+            return std::format("Design the crown of tooth {}.", app.toothText(r.tooth));
     }
     if (needCrown)
         for (const auto& b : doc.bridges)
             if (b.result && !b.result->ok)
-                return std::format("Bridge {} could not be merged: {}", b.label(), b.result->error);
+                return std::format("Bridge {} could not be merged: {}", bridgeName(app, b), b.result->error);
     return std::nullopt;
 }
 
@@ -1153,9 +1164,8 @@ public:
                 ensureDie(app, r);
     }
 
-    void drawPanel(DesignerApp& app) override
+    void update(DesignerApp& app) override
     {
-        const ui::Palette& pal = ui::palette();
         if (viewPending_ && !app.loading() && !restorationsPending(app)) {
             viewPending_ = false;
             setAntagonistVisible(app, false);
@@ -1168,6 +1178,13 @@ public:
                 mode_ = r->marginClosed() ? 2 : 0;
             }
         }
+        if (RestorationDesign* r = app.doc().active(); r && r->supported() && !r->isPontic())
+            requestPrepScan(app, r->prepScanId);
+    }
+
+    void drawPanel(DesignerApp& app) override
+    {
+        const ui::Palette& pal = ui::palette();
         if (drawRestorationCard(app, true))
             if (RestorationDesign* r = app.doc().active()) {
                 requestPrepScan(app, r->prepScanId);
@@ -1375,11 +1392,15 @@ public:
         setOverlaysVisible(app, "die:", false);
     }
 
+    void update(DesignerApp& app) override
+    {
+        if (!ready_)
+            prepare(app);
+    }
+
     void drawPanel(DesignerApp& app) override
     {
         const ui::Palette& pal = ui::palette();
-        if (!ready_)
-            prepare(app);
         if (drawRestorationCard(app, false)) {
             setOverlaysVisible(app, "die:", false);
             if (RestorationDesign* r = app.doc().active())
@@ -1418,7 +1439,7 @@ public:
                 ImGui::TextColored(pal.warning, "Undercuts: %.1f mm2, up to %.2f mm deep", rep.undercutArea, rep.maxDepth);
         };
         if (bridge) {
-            ui::wrappedMutedText(std::format("All abutments of bridge {} are seated along one axis.", bridge->label()).c_str());
+            ui::wrappedMutedText(std::format("All abutments of bridge {} are seated along one axis.", bridgeName(app, *bridge)).c_str());
             for (int t : bridge->teeth) {
                 RestorationDesign* u = findRestoration(app, t);
                 if (!u || u->isPontic() || !ensureAxis(app, *u))
@@ -1427,7 +1448,7 @@ public:
                 auto& own = ownAxis_[t];
                 if (!own.second || own.first != u->die.get())
                     own = {u->die.get(), std::make_optional(crown::optimizeInsertionAxis(u->die->mesh, u->marginAxis))};
-                ImGui::Text("%d", t);
+                ImGui::TextUnformatted(app.toothText(t).c_str());
                 ImGui::SameLine();
                 report(*u);
                 ImGui::SameLine();
@@ -1601,11 +1622,15 @@ public:
         setAntagonistVisible(app, true);
     }
 
+    void update(DesignerApp& app) override
+    {
+        if (!ready_)
+            prepare(app);
+    }
+
     void drawPanel(DesignerApp& app) override
     {
         const ui::Palette& pal = ui::palette();
-        if (!ready_)
-            prepare(app);
         drawRestorationCard(app, false);
         RestorationDesign* r = app.doc().active();
         if (!r || !r->supported())
@@ -2001,7 +2026,7 @@ private:
         const float full = -FLT_MIN;
         ImGui::Spacing();
         ui::beginCard("##bridge");
-        ui::subheading(std::format("Bridge {}", b.label()).c_str());
+        ui::subheading(std::format("Bridge {}", bridgeName(app, b)).c_str());
         int pontics = 0;
         for (int t : b.teeth)
             if (RestorationDesign* u = findRestoration(app, t); u && u->isPontic())
@@ -2046,7 +2071,7 @@ private:
                 ui::mutedText("Volume %.0f mm3, %zu triangles", b.result->volume, b.result->mesh.triangleCount());
                 for (std::size_t i = 0; i < b.result->connectorAreas.size() && i + 1 < b.teeth.size(); ++i) {
                     const double a = b.result->connectorAreas[i];
-                    ImGui::TextColored(a + 1e-3 >= b.connectorArea ? pal.success : pal.warning, "%d-%d", b.teeth[i], b.teeth[i + 1]);
+                    ImGui::TextColored(a + 1e-3 >= b.connectorArea ? pal.success : pal.warning, "%s-%s", app.toothText(b.teeth[i]).c_str(), app.toothText(b.teeth[i + 1]).c_str());
                     ImGui::SameLine();
                     ui::mutedText("connector %.1f mm2", a);
                 }
@@ -2073,7 +2098,7 @@ private:
         for (std::size_t i = 0; i < b.connectors.size(); ++i) {
             const auto& c = b.connectors[i];
             const bool warn = i < b.warnings.size() && !b.warnings[i].empty();
-            std::string label = std::format("{}-{}   {:.1f} mm2,  {:.1f} x {:.1f} mm", b.teeth[i], b.teeth[i + 1], c.area, c.height(), c.width());
+            std::string label = std::format("{}-{}   {:.1f} mm2,  {:.1f} x {:.1f} mm", app.toothText(b.teeth[i]), app.toothText(b.teeth[i + 1]), c.area, c.height(), c.width());
             if (!b.editAt(i).isDefault())
                 label += "  (edited)";
             if (warn)
@@ -2342,7 +2367,7 @@ void syncRestorations(DesignerApp& app)
                 r.displacement = saved.displacement;
                 r.crownGenerated = saved.crownGenerated;
             } else if (prep) {
-                log::warn("The scan of tooth {} changed since the design was saved; the margin must be redrawn.", saved.tooth);
+                log::warn("The scan of tooth {} changed since the design was saved; the margin must be redrawn.", app.toothText(saved.tooth));
             }
             doc.restorations.push_back(std::move(r));
         }
@@ -2467,8 +2492,8 @@ std::vector<SavedRestoration> captureRestorations(const DesignerApp& appC)
         s.displacement = r.displacement;
         s.crownGenerated = r.crownGenerated;
         if (r.crownGenerated)
-            s.crownFile = app.doc().bridgeOf(r.tooth) ? "design/bridge_" + app.doc().bridgeOf(r.tooth)->label() + ".stl"
-                                                       : "design/crown_" + std::to_string(r.tooth) + ".stl";
+            s.crownFile = app.doc().bridgeOf(r.tooth) ? "design/bridge_" + bridgeName(app, *app.doc().bridgeOf(r.tooth)) + ".stl"
+                                                       : "design/crown_" + app.toothText(r.tooth) + ".stl";
         out.push_back(std::move(s));
     }
     return out;
@@ -2487,20 +2512,41 @@ std::vector<CrownExport> crownExports(DesignerApp& app, bool merge)
             b.result = mergeBridge(units, b.connectors);
         }
         if (!b.result || !b.result->ok) {
-            log::warn("Bridge {} is not exported: {}", b.label(), b.result ? b.result->error : "not merged");
+            log::warn("Bridge {} is not exported: {}", bridgeName(app, b), b.result ? b.result->error : "not merged");
             continue;
         }
         auto mesh = std::make_shared<Mesh>(b.result->mesh);
-        out.push_back({b.teeth.front(), "Bridge " + b.label(), "bridge_" + b.label(), mesh});
+        const std::string name = bridgeName(app, b);
+        out.push_back({b.teeth.front(), "Bridge " + name, "bridge_" + name, mesh,
+                       app.numbering() == dental::Numbering::Universal ? std::format("OcclusaCAD Bridge {} (Universal; FDI {}), scan coordinates, mm", name, b.label())
+                                                                       : std::format("OcclusaCAD Bridge {} (FDI), scan coordinates, mm", name)});
     }
     for (const auto& r : app.doc().restorations) {
         if (!r.crown || !r.crownGenerated || app.doc().bridgeOf(r.tooth) || r.isPontic())
             continue;
         auto mesh = std::make_shared<Mesh>(r.crown->mesh);
         mesh->colors.clear();
-        out.push_back({r.tooth, std::format("{} {}", r.params.coping ? "Coping" : "Crown", r.tooth), std::format("crown_{}", r.tooth), mesh});
+        const char* kind = r.params.coping ? "Coping" : "Crown";
+        const std::string tooth = app.toothText(r.tooth);
+        out.push_back({r.tooth, std::format("{} {}", kind, tooth), std::format("crown_{}", tooth), mesh,
+                       app.numbering() == dental::Numbering::Universal ? std::format("OcclusaCAD {} {} (Universal; FDI {}), scan coordinates, mm", kind, tooth, r.tooth)
+                                                                       : std::format("OcclusaCAD {} {} (FDI), scan coordinates, mm", kind, tooth)});
     }
     return out;
+}
+
+bool allRestorationsExported(const DesignerApp& app)
+{
+    for (const auto& r : app.doc().restorations)
+        if (r.crownGenerated && !r.crown)
+            return false;
+    return true;
+}
+
+bool isGeneratedRestorationFile(const std::string& rel)
+{
+    auto starts = [&](std::string_view p) { return rel.rfind(p, 0) == 0; };
+    return (starts("design/crown_") || starts("design/bridge_")) && rel.size() > 4 && rel.compare(rel.size() - 4, 4, ".stl") == 0;
 }
 
 // ---------------------------------------------------------------------------

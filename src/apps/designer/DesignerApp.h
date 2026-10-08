@@ -5,6 +5,7 @@
 #include "apps/designer/Steps.h"
 #include "apps/designer/Views.h"
 #include "core/AppConfig.h"
+#include "core/Dental.h"
 #include "core/dicom/DicomSeries.h"
 #include "db/CaseRepository.h"
 #include "ui/App.h"
@@ -28,6 +29,9 @@ struct DesignerOptions {
     std::vector<std::filesystem::path> scanPaths;
     std::optional<std::string> startStep;
     std::optional<gfx::ViewPreset> viewPreset; // initial 3D view direction (--view)
+    bool showLeftPanel = true;  // --panels both|left|right|none
+    bool showRightPanel = true;
+    bool expandSteps = false;   // --expand-steps: open with the full step list shown
     bool expertMode = false;
     bool demoAutoAlign = false; // headless demo: run point-pair + ICP alignment automatically
     std::optional<std::filesystem::path> demoGroundTruth;
@@ -50,6 +54,9 @@ public:
     ui::TaskRunner& tasks() { return tasks_; }
     gfx::SceneRenderer& renderer() { return *renderer_; }
     const AppConfig& config() const { return config_; }
+    // Tooth numbering for display (the setting shared with OcclusaCAD DB); data stays FDI.
+    dental::Numbering numbering() const { return dental::numberingFromString(config_.toothNumbering); }
+    std::string toothText(int fdi) const { return dental::toothLabel(fdi, numbering()); }
     const DesignerOptions& designerOptions() const { return designerOptions_; }
 
     bool caseMode() const { return record_.has_value(); }
@@ -115,6 +122,7 @@ private:
     void drawToolbar(float height);
     void drawWorkflowPanel();
     void drawStepList();
+    void drawStepHeader();
     void drawObjectsPanel();
     void drawViewports();
     void drawStatusBar(float height);
@@ -158,6 +166,10 @@ private:
     std::map<workflow::StepId, std::unique_ptr<Step>> steps_;
     bool expert_ = false;
     bool firstFrame_ = true;
+    bool showLeftPanel_ = true;   // workflow / step panel
+    bool showRightPanel_ = true;  // objects and log
+    bool stepsExpanded_ = false;  // full step list shown under the current-step header
+    bool resetLayout_ = false;
 
     // Pending UI state
     std::vector<dicom::SeriesInfo> seriesChoice_;

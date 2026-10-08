@@ -36,6 +36,11 @@ int main(int argc, char** argv)
             so.dicomPaths.push_back(p);
     }
     so.startStep = cl.get("step");
+    if (auto panels = cl.get("panels")) {
+        so.showLeftPanel = *panels == "both" || *panels == "left";
+        so.showRightPanel = *panels == "both" || *panels == "right";
+    }
+    so.expandSteps = cl.has("expand-steps");
     if (auto v = cl.get("view")) {
         static const std::pair<const char*, gfx::ViewPreset> presets[] = {{"front", gfx::ViewPreset::Front}, {"back", gfx::ViewPreset::Back},
                                                                           {"left", gfx::ViewPreset::Left},   {"right", gfx::ViewPreset::Right},
@@ -72,6 +77,11 @@ int main(int argc, char** argv)
         options.screenshotPath = platform::pathFromUtf8(*shot);
         options.width = 1720;
         options.height = 1040;
+        if (auto size = cl.get("size")) // e.g. 1280x800
+            if (const auto x = size->find('x'); x != std::string::npos) {
+                options.width = std::stoi(size->substr(0, x));
+                options.height = std::stoi(size->substr(x + 1));
+            }
         options.screenshotFrames = std::stoi(cl.get("frames").value_or("90"));
     }
     designer::DesignerApp app(options, config, so);

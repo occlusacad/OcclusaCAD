@@ -38,6 +38,34 @@ std::string scanRoleLabel(db::FileRole r)
 }
 } // namespace
 
+namespace {
+
+// Sidebar toggle drawn as a small window icon with the left or right pane filled when shown.
+bool panelToggle(const char* id, bool left, bool shown, const char* what, const char* shortcut)
+{
+    const ui::Palette& pal = ui::palette();
+    const float h = ImGui::GetFrameHeight();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton(id, ImVec2(h, h));
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (hovered)
+        dl->AddRectFilled(p, ImVec2(p.x + h, p.y + h), ui::toU32(pal.surfaceAlt), ImGui::GetStyle().FrameRounding);
+    const float s = ImGui::GetStyle().FontScaleDpi;
+    const ImVec2 a(p.x + h * 0.2f, p.y + h * 0.25f), b(p.x + h * 0.8f, p.y + h * 0.75f);
+    const ImU32 col = ui::toU32(hovered ? pal.text : pal.textMuted);
+    const float pane = (b.x - a.x) * 0.36f;
+    if (shown)
+        dl->AddRectFilled(left ? a : ImVec2(b.x - pane, a.y), left ? ImVec2(a.x + pane, b.y) : b, ui::toU32(pal.accent), 2.0f * s);
+    dl->AddRect(a, b, col, 2.0f * s, 1.5f * s);
+    dl->AddLine(ImVec2(left ? a.x + pane : b.x - pane, a.y), ImVec2(left ? a.x + pane : b.x - pane, b.y), col, 1.5f * s);
+    if (hovered)
+        ImGui::SetTooltip("%s the %s (%s)", shown ? "Hide" : "Show", what, shortcut);
+    return clicked;
+}
+
+} // namespace
+
 DesignerApp::DesignerApp(ui::AppOptions options, AppConfig config, DesignerOptions designerOptions)
     : ui::GuiApp(std::move(options)), config_(std::move(config)), designerOptions_(std::move(designerOptions))
 {
@@ -60,6 +88,9 @@ void DesignerApp::onStart()
     if (!headless())
         ui::dialogs::init();
     expert_ = designerOptions_.expertMode;
+    showLeftPanel_ = designerOptions_.showLeftPanel;
+    showRightPanel_ = designerOptions_.showRightPanel;
+    stepsExpanded_ = designerOptions_.expandSteps;
     workflow_ = &workflow::defaultWorkflow();
 
     for (const auto& s : workflow::allSteps()) {
@@ -449,6 +480,7 @@ DesignState DesignerApp::captureState() const
         ss.registration = s->registration;
         st.scans.push_back(ss);
     }
+    st.numbering = numbering();
     st.restorations = captureRestorations(*this);
     st.bridges = captureBridges(*this);
     return st;
@@ -478,6 +510,9 @@ void DesignerApp::saveDesign(bool finish)
     for (const auto& s : doc_.scans)
         scans.push_back({s->id, s->mesh, s->transform, s->label, s->source, s->role, s->registration.registered});
     const std::vector<CrownExport> crowns = crownExports(*this, true);
+    // Outputs from an earlier save (e.g. under the other tooth numbering) are replaced, but only when
+    // every designed restoration is exported now, so nothing is lost if one is not rebuilt yet.
+    const bool replaceOldOutputs = allRestorationsExported(*this);
     const std::optional<std::string> volumeSource = doc_.volume ? std::optional<std::string>(doc_.volume->source) : std::nullopt;
     const db::CaseRecord record = *record_;
     db::ICaseRepository* repo = repo_.get();
@@ -519,11 +554,22 @@ void DesignerApp::saveDesign(bool finish)
         for (const auto& c : crowns) {
             progress(0.92f, "Exporting " + c.label);
             const fs::path out = designDir / platform::pathFromUtf8(c.fileStem + ".stl");
-            writeStlBinary(out, *c.mesh, glm::dmat4(1.0), "OcclusaCAD " + c.label + " (scan coordinates, mm)");
+            writeStlBinary(out, *c.mesh, glm::dmat4(1.0), c.header);
             outputs.push_back(db::CaseFile{0, db::FileRole::DesignOutput, repo->files().relativize(record, out), c.label, time::nowUtcIso8601()});
         }
+        std::vector<std::string> stale;
+        if (replaceOldOutputs)
+            for (const auto& f : record.files) {
+                if (f.role != db::FileRole::DesignOutput || !isGeneratedRestorationFile(f.relativePath))
+                    continue;
+                if (std::any_of(outputs.begin(), outputs.end(), [&](const db::CaseFile& o) { return o.relativePath == f.relativePath; }))
+                    continue;
+                std::error_code ec;
+                fs::remove(repo->files().resolve(record, f.relativePath), ec);
+                stale.push_back(f.relativePath);
+            }
         progress(1.0f, "Updating case database");
-        return [this, imported, newFiles, outputs, finish] {
+        return [this, imported, newFiles, outputs, stale, finish] {
             // Apply new sources to the document, then persist state + record on the UI thread.
             for (auto& s : doc_.scans)
                 if (auto it = imported.find(s->source); it != imported.end())
@@ -542,6 +588,7 @@ void DesignerApp::saveDesign(bool finish)
                     throw std::runtime_error("The case was deleted");
                 for (const auto& f : newFiles)
                     fresh->files.push_back(f);
+                std::erase_if(fresh->files, [&](const db::CaseFile& f) { return std::find(stale.begin(), stale.end(), f.relativePath) != stale.end(); });
                 for (const auto& o : outputs) {
                     auto it = std::find_if(fresh->files.begin(), fresh->files.end(), [&](const db::CaseFile& f) { return f.relativePath == o.relativePath; });
                     if (it == fresh->files.end())
@@ -590,7 +637,7 @@ void DesignerApp::exportDesign()
             ++count;
         }
         for (const auto& c : crowns) {
-            writeStlBinary(*dir / platform::pathFromUtf8(c.fileStem + ".stl"), *c.mesh, glm::dmat4(1.0), "OcclusaCAD " + c.label + " (scan coordinates, mm)");
+            writeStlBinary(*dir / platform::pathFromUtf8(c.fileStem + ".stl"), *c.mesh, glm::dmat4(1.0), c.header);
             ++count;
         }
         ui::toast(ui::ToastKind::Success, std::format("Exported {} file(s)", count));
@@ -624,19 +671,27 @@ void DesignerApp::onFrame()
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings |
                      ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoNavFocus);
     ImGui::PopStyleVar(3);
-    const ImGuiID dockId = ImGui::GetID("OcclusaDock");
-    if (firstFrame_) {
+    // v2: 25% / 50% / 25% default (a new id so layouts saved by older versions are replaced).
+    const ImGuiID dockId = ImGui::GetID("OcclusaDock.v2");
+    if (firstFrame_ || resetLayout_) {
         ImGuiDockNode* node = ImGui::DockBuilderGetNode(dockId);
-        if (!node || !node->IsSplitNode() || headless())
+        if (resetLayout_ || !node || !node->IsSplitNode() || headless())
             setupDockLayout(dockId);
+        if (resetLayout_)
+            showLeftPanel_ = showRightPanel_ = true;
+        resetLayout_ = false;
     }
     ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_None);
     ImGui::End();
 
+    step(current_).update(*this);
     drawViewports();
-    drawWorkflowPanel();
-    drawObjectsPanel();
-    if (ImGui::Begin(kLogWindow)) {
+    // Hidden sidebars are not submitted, so their dock nodes collapse and the viewports take the space.
+    if (showLeftPanel_)
+        drawWorkflowPanel();
+    if (showRightPanel_)
+        drawObjectsPanel();
+    if (showRightPanel_ && ImGui::Begin(kLogWindow)) {
         for (const auto& e : log::recent(300)) {
             const ui::Palette& p = ui::palette();
             const ImVec4 c = e.level == log::Level::Error ? p.danger : e.level == log::Level::Warning ? p.warning : p.textMuted;
@@ -647,7 +702,8 @@ void DesignerApp::onFrame()
         if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4)
             ImGui::SetScrollHereY(1.0f);
     }
-    ImGui::End();
+    if (showRightPanel_)
+        ImGui::End();
 
     drawStatusBar(statusH);
     drawSeriesChooser();
@@ -675,8 +731,8 @@ void DesignerApp::setupDockLayout(ImGuiID dockspaceId)
     ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(dockspaceId, vp->WorkSize);
     ImGuiID left = 0, rest = 0, right = 0, center = 0;
-    ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.235f, &left, &rest);
-    ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.21f, &right, &center);
+    ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.25f, &left, &rest);
+    ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 1.0f / 3.0f, &right, &center); // 25% of the whole width
     ImGui::DockBuilderDockWindow(kWorkflowWindow, left);
     ImGui::DockBuilderDockWindow(kObjectsWindow, right);
     ImGui::DockBuilderDockWindow(kLogWindow, right);
@@ -701,6 +757,10 @@ void DesignerApp::handleShortcuts()
         fitAllViews();
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_E, false))
         expert_ = !expert_;
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_LeftBracket, false))
+        showLeftPanel_ = !showLeftPanel_;
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_RightBracket, false))
+        showRightPanel_ = !showRightPanel_;
 }
 
 void DesignerApp::drawMenuBar()
@@ -751,8 +811,12 @@ void DesignerApp::drawMenuBar()
         if (ImGui::MenuItem("Dark theme", nullptr, themeMode() == ui::ThemeMode::Dark))
             setThemeMode(ui::ThemeMode::Dark);
         ImGui::Separator();
+        if (ImGui::MenuItem("Steps panel", "Ctrl+[", showLeftPanel_))
+            showLeftPanel_ = !showLeftPanel_;
+        if (ImGui::MenuItem("Objects panel", "Ctrl+]", showRightPanel_))
+            showRightPanel_ = !showRightPanel_;
         if (ImGui::MenuItem("Reset window layout"))
-            setupDockLayout(ImGui::GetID("OcclusaDock"));
+            resetLayout_ = true; // handled where the dock space lives (its id depends on that context)
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Workflow")) {
@@ -795,6 +859,9 @@ void DesignerApp::drawToolbar(float height)
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(3);
 
+    if (panelToggle("##leftpanel", true, showLeftPanel_, "steps panel", "Ctrl+["))
+        showLeftPanel_ = !showLeftPanel_;
+    ImGui::SameLine();
     {
         ui::fonts::Scope f(ui::fonts::semibold(), ui::fonts::kHeadingSize);
         ImGui::AlignTextToFramePadding();
@@ -825,7 +892,7 @@ void DesignerApp::drawToolbar(float height)
 
     // Right: layout, views, theme, save.
     const float unit = ImGui::GetFontSize();
-    const float rightBlock = unit * 33.0f;
+    const float rightBlock = unit * 35.0f;
     ImGui::SameLine(ImGui::GetWindowWidth() - rightBlock);
     int layoutIdx = static_cast<int>(layout_);
     if (ui::segmented("layout", {"Standard", "Align", "3D", "2x2"}, layoutIdx, unit * 5.0f))
@@ -854,6 +921,9 @@ void DesignerApp::drawToolbar(float height)
     ImGui::SameLine();
     if (ui::primaryButton("Save", ImVec2(unit * 4.5f, 0), caseMode() && !readOnly_ && !tasks_.busy()))
         saveDesign(false);
+    ImGui::SameLine();
+    if (panelToggle("##rightpanel", false, showRightPanel_, "objects panel", "Ctrl+]"))
+        showRightPanel_ = !showRightPanel_;
     ImGui::End();
 }
 
@@ -871,8 +941,10 @@ void DesignerApp::drawStepList()
         ImGui::PushID(static_cast<int>(id));
         const ImVec2 p = ImGui::GetCursorScreenPos();
         ImGui::BeginDisabled(!enabled);
-        if (ImGui::Selectable("##step", isCurrent, ImGuiSelectableFlags_None, ImVec2(0, rowH)) && enabled)
+        if (ImGui::Selectable("##step", isCurrent, ImGuiSelectableFlags_None, ImVec2(0, rowH)) && enabled) {
             goToStep(id);
+            stepsExpanded_ = false;
+        }
         ImGui::EndDisabled();
         const ImVec2 c(p.x + r + 2, p.y + rowH * 0.5f);
         const ImU32 col = isCurrent ? ui::toU32(pal.accent) : done ? ui::toU32(pal.success) : ui::toU32(pal.textMuted, enabled ? 1.0f : 0.5f);
@@ -938,6 +1010,55 @@ void DesignerApp::drawStepList()
     }
 }
 
+void DesignerApp::drawStepHeader()
+{
+    const ui::Palette& pal = ui::palette();
+    const auto& info = workflow::stepInfo(current_);
+    const int idx = workflowIndex(current_);
+    const float font = ImGui::GetFontSize();
+    const float h = font * 3.2f;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float w = ImGui::GetContentRegionAvail().x;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const bool clicked = ImGui::InvisibleButton("##stepheader", ImVec2(w, h));
+    const bool hovered = ImGui::IsItemHovered();
+    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), ui::toU32(hovered || stepsExpanded_ ? pal.surfaceAlt : pal.surface), ImGui::GetStyle().FrameRounding);
+    dl->AddRect(p, ImVec2(p.x + w, p.y + h), ui::toU32(pal.border), ImGui::GetStyle().FrameRounding);
+    if (clicked)
+        stepsExpanded_ = !stepsExpanded_;
+    if (hovered)
+        ImGui::SetTooltip(stepsExpanded_ ? "Hide the steps" : "Show all steps");
+
+    const float pad = font * 0.7f;
+    // Line 1: workflow and mode.
+    const std::string sub = expert_ ? workflow_->title + "  -  Expert mode"
+                                    : std::format("{}  -  step {} of {}", workflow_->title, std::max(idx + 1, 1), workflow_->steps.size());
+    dl->PushClipRect(p, ImVec2(p.x + w - pad * 2.5f, p.y + h), true);
+    dl->AddText(ImVec2(p.x + pad, p.y + pad * 0.6f), ui::toU32(pal.textMuted), sub.c_str());
+    // Line 2: badge with the step number and the step title.
+    const float r = font * 0.62f;
+    const ImVec2 c(p.x + pad + r, p.y + h - pad * 0.7f - font * 0.6f);
+    const bool done = completed_.count(current_) != 0;
+    dl->AddCircleFilled(c, r, ui::toU32(done ? pal.success : pal.accent), 24);
+    const std::string n = idx >= 0 ? std::to_string(idx + 1) : "-";
+    const ImVec2 ts = ImGui::CalcTextSize(n.c_str());
+    dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), IM_COL32_WHITE, n.c_str());
+    {
+        ui::fonts::Scope f(ui::fonts::semibold(), ui::fonts::kHeadingSize);
+        const float hf = ImGui::GetFontSize();
+        dl->AddText(ImVec2(c.x + r + font * 0.6f, c.y - hf * 0.5f), ui::toU32(pal.text), info.title);
+    }
+    dl->PopClipRect();
+    // Chevron.
+    const float cx = p.x + w - pad * 1.4f, cy = p.y + h * 0.5f, cs = font * 0.3f;
+    const ImU32 cc = ui::toU32(hovered ? pal.text : pal.textMuted);
+    if (stepsExpanded_)
+        dl->AddTriangleFilled(ImVec2(cx - cs, cy + cs * 0.5f), ImVec2(cx + cs, cy + cs * 0.5f), ImVec2(cx, cy - cs * 0.6f), cc);
+    else
+        dl->AddTriangleFilled(ImVec2(cx - cs, cy - cs * 0.5f), ImVec2(cx + cs, cy - cs * 0.5f), ImVec2(cx, cy + cs * 0.6f), cc);
+    ImGui::Spacing();
+}
+
 void DesignerApp::drawWorkflowPanel()
 {
     const ui::Palette& pal = ui::palette();
@@ -945,31 +1066,21 @@ void DesignerApp::drawWorkflowPanel()
         ImGui::End();
         return;
     }
-    {
-        ui::fonts::Scope f(ui::fonts::semibold(), ui::fonts::kHeadingSize);
-        ImGui::TextUnformatted(workflow_->title.c_str());
-    }
     const int idx = workflowIndex(current_);
-    if (expert_)
-        ui::mutedText("Expert mode  -  all tools available");
-    else
-        ui::mutedText("Wizard  -  step %d of %zu", std::max(idx + 1, 1), workflow_->steps.size());
-    ImGui::Spacing();
-
-    const float listH = std::min(ImGui::GetContentRegionAvail().y * 0.42f,
-                                 (expert_ ? static_cast<float>(workflow::allSteps().size() + workflow::stepGroups().size()) : static_cast<float>(workflow_->steps.size())) *
-                                     ImGui::GetFrameHeightWithSpacing() * 1.05f);
-    ImGui::BeginChild("##steplist", ImVec2(0, listH), ImGuiChildFlags_None);
-    drawStepList();
-    ImGui::EndChild();
+    // Compact: only the current step; clicking it shows the whole list.
+    drawStepHeader();
+    if (stepsExpanded_) {
+        const float listH = std::min(ImGui::GetContentRegionAvail().y * 0.5f,
+                                     (expert_ ? static_cast<float>(workflow::allSteps().size() + workflow::stepGroups().size()) : static_cast<float>(workflow_->steps.size())) *
+                                         ImGui::GetFrameHeightWithSpacing() * 1.05f);
+        ImGui::BeginChild("##steplist", ImVec2(0, listH), ImGuiChildFlags_None);
+        drawStepList();
+        ImGui::EndChild();
+    }
     ImGui::Separator();
     ImGui::Spacing();
 
     Step& st = step(current_);
-    {
-        ui::fonts::Scope f(ui::fonts::semibold(), ui::fonts::kHeadingSize);
-        ImGui::TextUnformatted(st.info().title);
-    }
     const float footerH = ImGui::GetFrameHeight() * 1.3f + ImGui::GetStyle().ItemSpacing.y * 2;
     ImGui::BeginChild("##steppanel", ImVec2(0, -footerH), ImGuiChildFlags_None);
     ui::wrappedMutedText(st.info().guidance);
@@ -1096,7 +1207,7 @@ void DesignerApp::drawObjectsPanel()
             if (ImGui::Checkbox("##cvis", &it->second.visible))
                 doc_.redraw();
             ImGui::SameLine();
-            ImGui::Text("%s %d", r.isPontic() ? "Pontic" : r.params.coping ? "Coping" : "Crown", r.tooth);
+            ImGui::Text("%s %s", r.isPontic() ? "Pontic" : r.params.coping ? "Coping" : "Crown", toothText(r.tooth).c_str());
             ImGui::SameLine();
             ui::mutedText("%.0f mm3", r.crown->volume);
             ImGui::PopID();
@@ -1332,6 +1443,7 @@ void DesignerApp::drawHelp()
         ui::subheading("General");
         line("F", "Fit all views");
         line("Ctrl + E", "Toggle wizard / expert mode");
+        line("Ctrl + [  /  Ctrl + ]", "Show / hide the steps and objects panels");
         line("Ctrl + S", "Save design");
     }
     ImGui::End();

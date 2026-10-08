@@ -629,7 +629,7 @@ void DbApp::drawCaseList()
             ImGui::TextUnformatted(c.practice.c_str());
             ImGui::TableSetColumnIndex(3);
             ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(c.teeth.c_str());
+            ImGui::TextUnformatted(dental::formatToothList(c.teeth, dental::numberingFromString(config_.toothNumbering)).c_str());
             ImGui::TableSetColumnIndex(4);
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ImGui::GetStyle().FramePadding.y * 0.5f);
             ui::pill(std::string(db::displayName(c.status)).c_str(), statusColor(c.status));
@@ -864,7 +864,7 @@ void DbApp::drawToothCard()
     for (const auto& r : draft_.restorations)
         assigned[r.tooth] = r.type;
     ui::ToothChartStyle style;
-    style.numbering = config_.toothNumbering == "universal" ? dental::Numbering::Universal : dental::Numbering::FDI;
+    style.numbering = dental::numberingFromString(config_.toothNumbering);
     style.width = std::min(ImGui::GetContentRegionAvail().x, ImGui::GetFontSize() * 30.0f);
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - style.width) * 0.5f);
     if (const int tooth = ui::toothChart("##chart", assigned, style)) {

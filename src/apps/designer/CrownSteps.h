@@ -27,12 +27,17 @@ std::vector<SavedBridge> captureBridges(const DesignerApp& app);
 struct CrownExport {
     int tooth = 0;
     std::string label;                 // e.g. "Crown 46", "Bridge 47-46-45"
-    std::string fileStem;              // e.g. "crown_46", "bridge_47-46-45"
+    std::string fileStem;              // e.g. "crown_46" / "crown_30" (named in the configured tooth numbering)
     std::shared_ptr<const Mesh> mesh;  // in the coordinates of the preparation scan file
+    std::string header;                // STL header: names the tooth in both numbering systems
 };
 // Finished restorations: single crowns, and each complete bridge merged into one solid (its units
 // are not exported separately). `merge` computes bridge unions that are out of date.
 std::vector<CrownExport> crownExports(DesignerApp& app, bool merge);
+// True when every designed restoration is part of crownExports() (all geometry is rebuilt).
+bool allRestorationsExported(const DesignerApp& app);
+// Case files written by OcclusaCAD for restorations (design/crown_*.stl, design/bridge_*.stl).
+bool isGeneratedRestorationFile(const std::string& relativePath);
 
 // Headless demo / end-to-end check: detect the margin at the ground-truth preparation point,
 // set the axis, design the crown automatically and compare the margin with the ground truth.

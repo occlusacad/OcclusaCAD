@@ -46,6 +46,20 @@ TEST_CASE("Tooth numbering")
     CHECK(dental::isValidFdi(36));
     CHECK_FALSE(dental::isValidFdi(19));
     CHECK(dental::toothName(36) == "Lower left first molar");
+    // Universal -> FDI is the exact inverse for all 32 teeth.
+    for (int q = 1; q <= 4; ++q)
+        for (int p = 1; p <= 8; ++p)
+            CHECK(dental::universalToFdi(dental::fdiToUniversal(q * 10 + p)) == q * 10 + p);
+    CHECK(dental::universalToFdi(0) == 0);
+    CHECK(dental::universalToFdi(33) == 0);
+    CHECK(dental::parseTooth(30, dental::Numbering::Universal) == 46);
+    CHECK(dental::parseTooth(46, dental::Numbering::FDI) == 46);
+    CHECK(dental::parseTooth(19, dental::Numbering::FDI) == 0);
+    CHECK(dental::numberingFromString("universal") == dental::Numbering::Universal);
+    CHECK(dental::numberingFromString("fdi") == dental::Numbering::FDI);
+    CHECK(dental::toothList({35, 36, 37}, dental::Numbering::Universal, "-") == "20-19-18");
+    CHECK(dental::formatToothList("11, 12, 21", dental::Numbering::Universal) == "8, 7, 9");
+    CHECK(dental::formatToothList("11, 12", dental::Numbering::FDI) == "11, 12");
 }
 
 TEST_CASE("UUIDs")

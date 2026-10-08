@@ -122,7 +122,9 @@ Environment overrides: `OCCLUSACAD_CONFIG` (config file path), `OCCLUSACAD_DATA_
 | Wheel | zoom at cursor | next/previous slice (Shift ×5), Ctrl+wheel zoom |
 | Left click | pick point (alignment, margin, free-form) | set crosshair |
 
-`F` fits all views, `Ctrl+E` toggles wizard/expert, `Ctrl+S` saves and `F1` shows help.
+`F` fits all views, `Ctrl+E` toggles wizard/expert, `Ctrl+[` / `Ctrl+]` hide or show the steps and objects panels, `Ctrl+S` saves and `F1` shows help.
+
+The window is split 25% / 50% / 25% by default. The steps panel shows the current step; click it to see all the steps of the workflow. Both sidebars can be hidden with the buttons at the ends of the toolbar, and **View > Reset window layout** restores the default.
 
 ## Try it with the synthetic phantom
 

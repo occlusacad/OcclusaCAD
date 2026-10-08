@@ -26,6 +26,64 @@ int fdiToUniversal(int fdi)
     }
 }
 
+int universalToFdi(int u)
+{
+    if (u >= 1 && u <= 8)
+        return 19 - u;  // 1 -> 18 ... 8 -> 11
+    if (u >= 9 && u <= 16)
+        return 12 + u;  // 9 -> 21 ... 16 -> 28
+    if (u >= 17 && u <= 24)
+        return 55 - u;  // 17 -> 38 ... 24 -> 31
+    if (u >= 25 && u <= 32)
+        return 16 + u;  // 25 -> 41 ... 32 -> 48
+    return 0;
+}
+
+Numbering numberingFromString(std::string_view s)
+{
+    return s == "universal" ? Numbering::Universal : Numbering::FDI;
+}
+
+int parseTooth(int number, Numbering numbering)
+{
+    if (numbering == Numbering::Universal)
+        return universalToFdi(number);
+    return isValidFdi(number) ? number : 0;
+}
+
+std::string toothList(const std::vector<int>& fdi, Numbering numbering, std::string_view separator)
+{
+    std::string out;
+    for (int t : fdi) {
+        if (!out.empty())
+            out += separator;
+        out += toothLabel(t, numbering);
+    }
+    return out;
+}
+
+std::string formatToothList(std::string_view fdiList, Numbering numbering)
+{
+    if (numbering == Numbering::FDI)
+        return std::string(fdiList);
+    std::vector<int> teeth;
+    int value = 0;
+    bool any = false;
+    for (char c : fdiList) {
+        if (c >= '0' && c <= '9') {
+            value = value * 10 + (c - '0');
+            any = true;
+        } else if (any) {
+            teeth.push_back(value);
+            value = 0;
+            any = false;
+        }
+    }
+    if (any)
+        teeth.push_back(value);
+    return toothList(teeth, numbering);
+}
+
 std::string toothLabel(int fdi, Numbering numbering)
 {
     if (numbering == Numbering::Universal)

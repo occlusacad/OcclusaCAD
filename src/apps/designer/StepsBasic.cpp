@@ -305,7 +305,7 @@ public:
         for (const auto& r : doc.restorations) {
             if (!r.supported())
                 continue;
-            ImGui::Text("%s %d", r.isPontic() ? "Pontic" : r.params.coping ? "Coping" : "Crown", r.tooth);
+            ImGui::Text("%s %s", r.isPontic() ? "Pontic" : r.params.coping ? "Coping" : "Crown", app.toothText(r.tooth).c_str());
             ImGui::SameLine();
             if (r.crown)
                 ui::pill(std::format("{:.0f} mm3, min. {:.2f} mm", r.crown->volume, r.crown->minThickness).c_str(), r.crown->watertight ? pal.success : pal.danger);
@@ -315,7 +315,7 @@ public:
                 ui::pill("not designed", pal.warning);
         }
         for (const auto& b : doc.bridges) {
-            ImGui::Text("Bridge %s", b.label().c_str());
+            ImGui::Text("Bridge %s", dental::toothList(b.teeth, app.numbering(), "-").c_str());
             ImGui::SameLine();
             if (b.result && b.result->ok)
                 ui::pill(std::format("merged, {:.0f} mm3", b.result->volume).c_str(), b.result->watertight ? pal.success : pal.danger);

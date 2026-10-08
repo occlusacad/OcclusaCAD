@@ -179,10 +179,21 @@ crown::CrownParameters paramsFromJson(const json& j)
     return p;
 }
 
-json restorationToJson(const SavedRestoration& r)
+// Teeth are written in the file's numbering and read back to FDI.
+int toFile(int fdi, dental::Numbering n)
+{
+    return n == dental::Numbering::Universal ? dental::fdiToUniversal(fdi) : fdi;
+}
+
+int fromFile(int number, dental::Numbering n)
+{
+    return n == dental::Numbering::Universal ? dental::universalToFdi(number) : number;
+}
+
+json restorationToJson(const SavedRestoration& r, dental::Numbering n)
 {
     json o;
-    o["tooth"] = r.tooth;
+    o["tooth"] = toFile(r.tooth, n);
     o["type"] = r.type;
     o["prepScan"] = r.prepScanSource;
     o["antagonist"] = r.antagonistSource;
@@ -212,10 +223,10 @@ json restorationToJson(const SavedRestoration& r)
     return o;
 }
 
-SavedRestoration restorationFromJson(const json& o)
+SavedRestoration restorationFromJson(const json& o, dental::Numbering n)
 {
     SavedRestoration r;
-    r.tooth = o.value("tooth", 0);
+    r.tooth = fromFile(o.value("tooth", 0), n);
     r.type = o.value("type", "");
     r.prepScanSource = o.value("prepScan", "");
     r.antagonistSource = o.value("antagonist", "");
@@ -255,6 +266,7 @@ std::string DesignState::toJson() const
     j["version"] = 1;
     j["savedUtc"] = time::nowUtcIso8601();
     j["workflow"] = workflow;
+    j["toothNumbering"] = numbering == dental::Numbering::Universal ? "universal" : "fdi";
     j["currentStep"] = currentStep;
     j["completedSteps"] = completedSteps;
     j["cursor"] = json::array({cursor.x, cursor.y, cursor.z});
@@ -295,13 +307,16 @@ std::string DesignState::toJson() const
     if (!restorations.empty()) {
         json rj = json::array();
         for (const auto& r : restorations)
-            rj.push_back(restorationToJson(r));
+            rj.push_back(restorationToJson(r, numbering));
         j["restorations"] = rj;
     }
     if (!bridges.empty()) {
         json bj = json::array();
         for (const auto& b : bridges) {
-            json o = {{"teeth", b.teeth}, {"connectorArea", b.connectorArea}, {"connectorHeightRatio", b.connectorHeightRatio}, {"embrasure", b.embrasure}};
+            std::vector<int> teeth;
+            for (int t : b.teeth)
+                teeth.push_back(toFile(t, numbering));
+            json o = {{"teeth", teeth}, {"connectorArea", b.connectorArea}, {"connectorHeightRatio", b.connectorHeightRatio}, {"embrasure", b.embrasure}};
             if (b.axis)
                 o["axis"] = dvec3ToJson(*b.axis);
             json edits = json::array();
@@ -320,6 +335,7 @@ DesignState DesignState::fromJson(const std::string& text)
     DesignState st;
     const json j = json::parse(text);
     st.workflow = j.value("workflow", "");
+    st.numbering = dental::numberingFromString(j.value("toothNumbering", "fdi")); // older files: FDI
     st.currentStep = j.value("currentStep", "");
     if (j.contains("completedSteps"))
         st.completedSteps = j["completedSteps"].get<std::vector<std::string>>();
@@ -365,11 +381,12 @@ DesignState DesignState::fromJson(const std::string& text)
     }
     if (j.contains("restorations"))
         for (const auto& o : j["restorations"])
-            st.restorations.push_back(restorationFromJson(o));
+            st.restorations.push_back(restorationFromJson(o, st.numbering));
     if (j.contains("bridges"))
         for (const auto& o : j["bridges"]) {
             SavedBridge b;
-            b.teeth = o.value("teeth", std::vector<int>{});
+            for (int t : o.value("teeth", std::vector<int>{}))
+                b.teeth.push_back(fromFile(t, st.numbering));
             b.connectorArea = o.value("connectorArea", b.connectorArea);
             b.connectorHeightRatio = o.value("connectorHeightRatio", b.connectorHeightRatio);
             b.embrasure = o.value("embrasure", b.embrasure);
