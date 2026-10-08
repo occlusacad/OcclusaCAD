@@ -117,7 +117,7 @@ private:
     DesignState captureState() const;
 
     // UI
-    void setupDockLayout(unsigned int dockspaceId);
+    void setupDockLayout(unsigned int dockspaceId, ImVec2 size);
     void drawMenuBar();
     void drawToolbar(float height);
     void drawWorkflowPanel();

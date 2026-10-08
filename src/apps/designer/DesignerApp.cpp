@@ -77,6 +77,8 @@ DesignerApp::~DesignerApp() = default;
 // Startup / shutdown
 // ---------------------------------------------------------------------------
 
+static void scaleSideNodes(ImGuiDockNode* node, float scale);
+
 void DesignerApp::onStart()
 {
     renderer_ = std::make_unique<gfx::SceneRenderer>();
@@ -694,14 +696,21 @@ void DesignerApp::onFrame()
     ImGui::PopStyleVar(3);
     // v2: 25% / 50% / 25% default (a new id so layouts saved by older versions are replaced).
     const ImGuiID dockId = ImGui::GetID("OcclusaDock.v2");
+    const ImVec2 dockSize = ImGui::GetContentRegionAvail();
     if (firstFrame_ || resetLayout_) {
         ImGuiDockNode* node = ImGui::DockBuilderGetNode(dockId);
         if (resetLayout_ || !node || !node->IsSplitNode() || headless())
-            setupDockLayout(dockId);
+            setupDockLayout(dockId, dockSize);
         if (resetLayout_)
             showLeftPanel_ = showRightPanel_ = true;
         resetLayout_ = false;
     }
+    // ImGui keeps side nodes at a fixed pixel width and gives any change to the central node. Scale
+    // them with the window instead, so the 25/50/25 split (or the user's own) survives maximising and
+    // a layout saved at another window size.
+    if (ImGuiDockNode* root = ImGui::DockBuilderGetNode(dockId); root && root->Size.x > 0.0f && dockSize.x > 0.0f &&
+                                                                  std::abs(root->Size.x - dockSize.x) > 0.5f)
+        scaleSideNodes(root, dockSize.x / root->Size.x);
     ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_None);
     ImGui::End();
 
@@ -754,12 +763,26 @@ void DesignerApp::onFrame()
     firstFrame_ = false;
 }
 
-void DesignerApp::setupDockLayout(ImGuiID dockspaceId)
+// Scales the width of every node beside the central one (the sidebars) along horizontal splits.
+static void scaleSideNodes(ImGuiDockNode* node, float scale)
 {
-    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    if (!node || !node->IsSplitNode())
+        return;
+    for (ImGuiDockNode* child : node->ChildNodes) {
+        if (child->IsCentralNode() || child->HasCentralNodeChild)
+            scaleSideNodes(child, scale);
+        else if (node->SplitAxis == ImGuiAxis_X) {
+            child->SizeRef.x *= scale;
+            child->Size.x *= scale;
+        }
+    }
+}
+
+void DesignerApp::setupDockLayout(ImGuiID dockspaceId, ImVec2 size)
+{
     ImGui::DockBuilderRemoveNode(dockspaceId);
     ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
-    ImGui::DockBuilderSetNodeSize(dockspaceId, vp->WorkSize);
+    ImGui::DockBuilderSetNodeSize(dockspaceId, size);
     ImGuiID left = 0, rest = 0, right = 0, center = 0;
     ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.25f, &left, &rest);
     ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 1.0f / 3.0f, &right, &center); // 25% of the whole width
