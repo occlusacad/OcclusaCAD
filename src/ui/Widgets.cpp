@@ -29,6 +29,33 @@ bool primaryButton(const char* label, const ImVec2& size, bool enabled)
     return pressed && enabled;
 }
 
+bool accessKeyPressed(ImGuiKey key)
+{
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.WantTextInput || io.KeyCtrl || io.KeyShift || io.KeySuper)
+        return false;
+    return ImGui::IsKeyPressed(key, false);
+}
+
+bool accessButton(const char* label, int keyIndex, ImGuiKey key, const ImVec2& size, bool primary)
+{
+    const bool pressed = primary ? primaryButton(label, size) : ImGui::Button(label, size);
+    // Underline the access key's letter.
+    const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+    const char* end = ImGui::FindRenderedTextEnd(label);
+    ImFont* font = primary ? fonts::semibold() : ImGui::GetFont();
+    const float fs = ImGui::GetFontSize();
+    const ImVec2 textSize = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, label, end);
+    const ImVec2& align = ImGui::GetStyle().ButtonTextAlign;
+    const float x0 = min.x + (max.x - min.x - textSize.x) * align.x;
+    const float y = min.y + (max.y - min.y + textSize.y) * 0.5f;
+    const float a = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, label, label + keyIndex).x;
+    const float b = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, label, label + keyIndex + 1).x;
+    const ImU32 col = primary ? ImGui::GetColorU32(palette().onAccent) : ImGui::GetColorU32(ImGuiCol_Text);
+    ImGui::GetWindowDrawList()->AddLine(ImVec2(x0 + a, y), ImVec2(x0 + b, y), col, 1.0f);
+    return pressed || accessKeyPressed(key);
+}
+
 bool dangerButton(const char* label, const ImVec2& size)
 {
     const Palette& p = palette();

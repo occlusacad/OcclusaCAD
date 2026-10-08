@@ -88,9 +88,30 @@ void DesignerApp::onStart()
     if (!headless())
         ui::dialogs::init();
     expert_ = designerOptions_.expertMode;
-    showLeftPanel_ = designerOptions_.showLeftPanel;
-    showRightPanel_ = designerOptions_.showRightPanel;
     stepsExpanded_ = designerOptions_.expandSteps;
+    // Sidebar visibility is remembered in designer.ini (per user, next to the window layout; read
+    // by ImGui on the first frame).
+    static ImGuiSettingsHandler panels;
+    panels.TypeName = "OcclusaCAD";
+    panels.TypeHash = ImHashStr("OcclusaCAD");
+    panels.UserData = this;
+    panels.ReadOpenFn = [](ImGuiContext*, ImGuiSettingsHandler*, const char* name) -> void* {
+        return std::strcmp(name, "Panels") == 0 ? reinterpret_cast<void*>(1) : nullptr;
+    };
+    panels.ReadLineFn = [](ImGuiContext*, ImGuiSettingsHandler* h, void*, const char* line) {
+        auto* app = static_cast<DesignerApp*>(h->UserData);
+        if (std::strncmp(line, "Left=", 5) == 0)
+            app->showLeftPanel_ = app->savedLeftPanel_ = std::atoi(line + 5) != 0;
+        else if (std::strncmp(line, "Right=", 6) == 0)
+            app->showRightPanel_ = app->savedRightPanel_ = std::atoi(line + 6) != 0;
+    };
+    panels.WriteAllFn = [](ImGuiContext*, ImGuiSettingsHandler* h, ImGuiTextBuffer* buf) {
+        auto* app = static_cast<DesignerApp*>(h->UserData);
+        buf->appendf("[%s][Panels]\nLeft=%d\nRight=%d\n\n", h->TypeName, app->showLeftPanel_ ? 1 : 0, app->showRightPanel_ ? 1 : 0);
+        app->savedLeftPanel_ = app->showLeftPanel_;
+        app->savedRightPanel_ = app->showRightPanel_;
+    };
+    ImGui::AddSettingsHandler(&panels);
     workflow_ = &workflow::defaultWorkflow();
 
     for (const auto& s : workflow::allSteps()) {
@@ -684,6 +705,15 @@ void DesignerApp::onFrame()
     ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_None);
     ImGui::End();
 
+    if (firstFrame_) {
+        // The command line wins over the remembered sidebar state (loaded by now).
+        if (designerOptions_.showLeftPanel)
+            showLeftPanel_ = *designerOptions_.showLeftPanel;
+        if (designerOptions_.showRightPanel)
+            showRightPanel_ = *designerOptions_.showRightPanel;
+    }
+    if (showLeftPanel_ != savedLeftPanel_ || showRightPanel_ != savedRightPanel_)
+        ImGui::MarkIniSettingsDirty(); // ImGui writes designer.ini shortly after
     step(current_).update(*this);
     drawViewports();
     // Hidden sidebars are not submitted, so their dock nodes collapse and the viewports take the space.
@@ -1395,20 +1425,22 @@ void DesignerApp::drawClosePrompt()
         ImGui::Spacing();
         const float w = ImGui::GetFontSize() * 7;
         if (caseMode()) {
-            if (ui::primaryButton("Save", ImVec2(w, 0))) {
+            // S / Enter: save, D / N: don't save, Esc: cancel (Alt optional, as on Windows).
+            if (ui::accessButton("Save", 0, ImGuiKey_S, ImVec2(w, 0), true) || ui::accessKeyPressed(ImGuiKey_Enter) ||
+                ui::accessKeyPressed(ImGuiKey_KeypadEnter)) {
                 closeAfterSave_ = true;
                 saveDesign(false);
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
         }
-        if (ImGui::Button(caseMode() ? "Don't save" : "Discard", ImVec2(w, 0))) {
+        if (ui::accessButton(caseMode() ? "Don't save" : "Discard", 0, ImGuiKey_D, ImVec2(w, 0)) || ui::accessKeyPressed(ImGuiKey_N)) {
             doc_.modified = false;
             quit();
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(w, 0)))
+        if (ImGui::Button("Cancel", ImVec2(w, 0)) || ui::accessKeyPressed(ImGuiKey_Escape))
             ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }

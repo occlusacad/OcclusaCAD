@@ -1138,7 +1138,9 @@ void DbApp::drawPendingPrompt()
                 quit();
         };
         const float w = ImGui::GetFontSize() * 7;
-        if (ui::primaryButton("Save", ImVec2(w, 0))) {
+        // S / Enter: save, D / N: don't save, Esc: cancel (Alt optional, as on Windows).
+        if (ui::accessButton("Save", 0, ImGuiKey_S, ImVec2(w, 0), true) || ui::accessKeyPressed(ImGuiKey_Enter) ||
+            ui::accessKeyPressed(ImGuiKey_KeypadEnter)) {
             ImGui::CloseCurrentPopup();
             if (save())
                 proceed();
@@ -1146,14 +1148,14 @@ void DbApp::drawPendingPrompt()
                 pending_ = Pending::None;
         }
         ImGui::SameLine();
-        if (ImGui::Button("Don't save", ImVec2(w, 0))) {
+        if (ui::accessButton("Don't save", 0, ImGuiKey_D, ImVec2(w, 0)) || ui::accessKeyPressed(ImGuiKey_N)) {
             ImGui::CloseCurrentPopup();
             editing_ = false;
             isNew_ = false;
             proceed();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(w, 0))) {
+        if (ImGui::Button("Cancel", ImVec2(w, 0)) || ui::accessKeyPressed(ImGuiKey_Escape)) {
             pending_ = Pending::None;
             ImGui::CloseCurrentPopup();
         }

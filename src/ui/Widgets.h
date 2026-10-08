@@ -13,6 +13,12 @@ bool dangerButton(const char* label, const ImVec2& size = ImVec2(0, 0));
 // Regular button that can be disabled.
 bool button(const char* label, const ImVec2& size = ImVec2(0, 0), bool enabled = true);
 
+// Dialog button with an access key: label[keyIndex] is underlined and the key, alone or with Alt,
+// presses it (when no text field has focus).
+bool accessButton(const char* label, int keyIndex, ImGuiKey key, const ImVec2& size = ImVec2(0, 0), bool primary = false);
+// True when key was just pressed, alone or with Alt, and no text field has focus.
+bool accessKeyPressed(ImGuiKey key);
+
 void heading(const char* text);
 void subheading(const char* text);
 void mutedText(const char* fmt, ...) IM_FMTARGS(1);

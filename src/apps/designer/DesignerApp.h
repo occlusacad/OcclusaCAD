@@ -29,8 +29,8 @@ struct DesignerOptions {
     std::vector<std::filesystem::path> scanPaths;
     std::optional<std::string> startStep;
     std::optional<gfx::ViewPreset> viewPreset; // initial 3D view direction (--view)
-    bool showLeftPanel = true;  // --panels both|left|right|none
-    bool showRightPanel = true;
+    std::optional<bool> showLeftPanel;  // --panels both|left|right|none (else the remembered state)
+    std::optional<bool> showRightPanel;
     bool expandSteps = false;   // --expand-steps: open with the full step list shown
     bool expertMode = false;
     bool demoAutoAlign = false; // headless demo: run point-pair + ICP alignment automatically
@@ -170,6 +170,7 @@ private:
     bool showRightPanel_ = true;  // objects and log
     bool stepsExpanded_ = false;  // full step list shown under the current-step header
     bool resetLayout_ = false;
+    bool savedLeftPanel_ = true, savedRightPanel_ = true; // last state written to designer.ini
 
     // Pending UI state
     std::vector<dicom::SeriesInfo> seriesChoice_;
