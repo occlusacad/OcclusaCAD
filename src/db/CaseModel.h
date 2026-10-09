@@ -29,7 +29,6 @@ struct Restoration {
     std::string type;           // dental::RestorationType::key
     std::string material;
     std::string shade;
-    std::string implantSystem;  // implant manufacturer / system for implant types
     std::string notes;
 
     bool operator==(const Restoration&) const = default;

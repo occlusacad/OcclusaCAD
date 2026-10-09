@@ -203,7 +203,7 @@ ViewEvents View3D::draw(RenderServices& rs, const ImVec2& sizeIn, const OverlayF
     const bool gizmoBusy = (gizmoScan != 0 || gizmoPivot) && (ImGuizmo::IsUsing() || ImGuizmo::IsOver());
     interacting_ = false;
     if (active && !gizmoBusy) {
-        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f)) {
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f) && !blockOrbit) {
             camera.orbit(io.MouseDelta.x, io.MouseDelta.y, size.y);
             interacting_ = true;
         }
@@ -222,7 +222,7 @@ ViewEvents View3D::draw(RenderServices& rs, const ImVec2& sizeIn, const OverlayF
         camera.target += offset * (1.0 - factor);
         camera.zoom(factor);
     }
-    if (hovered && !gizmoBusy && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && io.MouseDragMaxDistanceSqr[0] < 16.0f) {
+    if (hovered && !gizmoBusy && !blockOrbit && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && io.MouseDragMaxDistanceSqr[0] < 16.0f) {
         const double ndcX = (io.MousePos.x - pos.x) / size.x * 2.0 - 1.0;
         const double ndcY = 1.0 - (io.MousePos.y - pos.y) / size.y * 2.0;
         ev.click = camera.rayFromNdc(ndcX, ndcY, aspect);
@@ -245,7 +245,7 @@ ViewEvents View3D::draw(RenderServices& rs, const ImVec2& sizeIn, const OverlayF
                 continue;
             if (content == ViewContent::ScanOnly && s->id != scanFilter)
                 continue;
-            if (content == ViewContent::Combined && !s->visible)
+            if (content == ViewContent::Combined && (!s->visible || s->stepHidden))
                 continue;
             gfx::MeshDraw md;
             md.mesh = s->gpu.get();

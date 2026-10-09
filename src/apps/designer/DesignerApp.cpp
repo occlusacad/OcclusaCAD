@@ -1,5 +1,6 @@
 #include "apps/designer/DesignerApp.h"
 
+#include "apps/designer/AbutmentSteps.h"
 #include "apps/designer/StepScanAlignment.h"
 #include "core/Log.h"
 #include "core/Platform.h"
@@ -87,6 +88,10 @@ void DesignerApp::onStart()
     if (!config_.dataRoot.empty())
         libraries.scanDirectory(config_.librariesRoot());
     libraries.scanDirectory(platform::configDir() / "libraries");
+    auto& implantLibraries = implant::ImplantLibraryRegistry::instance();
+    if (!config_.dataRoot.empty())
+        implantLibraries.scanDirectory(config_.implantLibrariesRoot());
+    implantLibraries.scanDirectory(platform::configDir() / "implant-libraries");
     if (!headless())
         ui::dialogs::init();
     expert_ = designerOptions_.expertMode;
@@ -126,6 +131,8 @@ void DesignerApp::onStart()
         case StepId::MarginLine: st = makeMarginLineStep(); break;
         case StepId::InsertionAxis: st = makeInsertionAxisStep(); break;
         case StepId::CrownDesign: st = makeCrownDesignStep(); break;
+        case StepId::ScanBodyAlignment: st = makeScanBodyAlignmentStep(); break;
+        case StepId::AbutmentDesign: st = makeAbutmentDesignStep(); break;
         default: st = makePlaceholderStep(s.id); break;
         }
         steps_[s.id] = std::move(st);
@@ -140,6 +147,13 @@ void DesignerApp::onStart()
         d.save = designerOptions_.demoSave;
         d.library = designerOptions_.demoLibrary;
         crownDemo_ = d;
+    }
+    if (designerOptions_.demoAbutmentTruth) {
+        AbutmentDemo d;
+        d.truthFile = *designerOptions_.demoAbutmentTruth;
+        d.maxError = designerOptions_.demoMaxImplantError;
+        d.save = designerOptions_.demoSave;
+        abutmentDemo_ = d;
     }
 
     for (const auto& p : designerOptions_.dicomPaths)
@@ -216,6 +230,7 @@ void DesignerApp::openCase()
                 savedState_ = DesignState::fromJson(*js);
                 doc_.pendingRestorations = savedState_->restorations;
                 doc_.pendingBridges = savedState_->bridges;
+                doc_.pendingImplants = savedState_->implants;
                 for (const auto& k : savedState_->completedSteps)
                     if (auto s = workflow::stepFromKey(k))
                         completed_.insert(*s);
@@ -506,6 +521,7 @@ DesignState DesignerApp::captureState() const
     st.numbering = numbering();
     st.restorations = captureRestorations(*this);
     st.bridges = captureBridges(*this);
+    st.implants = captureImplants(*this);
     return st;
 }
 
@@ -532,10 +548,12 @@ void DesignerApp::saveDesign(bool finish)
     std::vector<ScanExport> scans;
     for (const auto& s : doc_.scans)
         scans.push_back({s->id, s->mesh, s->transform, s->label, s->source, s->role, s->registration.registered});
-    const std::vector<CrownExport> crowns = crownExports(*this, true);
+    std::vector<CrownExport> crowns = crownExports(*this, true);
+    for (auto& a : abutmentExports(*this))
+        crowns.push_back(std::move(a));
     // Outputs from an earlier save (e.g. under the other tooth numbering) are replaced, but only when
     // every designed restoration is exported now, so nothing is lost if one is not rebuilt yet.
-    const bool replaceOldOutputs = allRestorationsExported(*this);
+    const bool replaceOldOutputs = allRestorationsExported(*this) && allAbutmentsExported(*this);
     const std::optional<std::string> volumeSource = doc_.volume ? std::optional<std::string>(doc_.volume->source) : std::nullopt;
     const db::CaseRecord record = *record_;
     db::ICaseRepository* repo = repo_.get();
@@ -639,12 +657,14 @@ void DesignerApp::saveDesign(bool finish)
 
 void DesignerApp::exportDesign()
 {
-    const auto crowns = crownExports(*this, true);
+    auto crowns = crownExports(*this, true);
+    for (auto& a : abutmentExports(*this))
+        crowns.push_back(std::move(a));
     bool anyScan = false;
     for (const auto& s : doc_.scans)
         anyScan |= s->registration.registered;
     if (!anyScan && crowns.empty()) {
-        ui::showError("Export", "There is nothing to export yet: no scan is aligned to a CBCT and no crown is designed.");
+        ui::showError("Export", "There is nothing to export yet: no scan is aligned to a CBCT and no crown or abutment is designed.");
         return;
     }
     auto dir = ui::dialogs::pickFolder();
@@ -756,8 +776,11 @@ void DesignerApp::onFrame()
     if (designerOptions_.demoAutoAlign)
         runDemoAutoAlign();
     syncRestorations(*this);
+    syncImplants(*this);
     if (crownDemo_)
         runCrownDemo(*this, *crownDemo_);
+    if (abutmentDemo_)
+        runAbutmentDemo(*this, *abutmentDemo_);
     if (tasks_.busy() || !queue_.empty())
         requestRedraw();
     firstFrame_ = false;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "apps/designer/AbutmentSteps.h"
 #include "apps/designer/CrownSteps.h"
 #include "apps/designer/Document.h"
 #include "apps/designer/Steps.h"
@@ -40,6 +41,8 @@ struct DesignerOptions {
     std::optional<std::filesystem::path> demoCrownTruth; // headless demo: automatic crown design checked against this
     double demoMaxMarginError = 0.0;
     std::string demoLibrary;
+    std::optional<std::filesystem::path> demoAbutmentTruth; // headless demo: scan body + default abutment checked against this
+    double demoMaxImplantError = 0.0;
 };
 
 // OcclusaCAD: the design application (Implant Studio style workflows).
@@ -101,7 +104,8 @@ protected:
     void onShutdown() override;
     bool headlessBusy() const override
     {
-        return tasks_.busy() || !queue_.empty() || (designerOptions_.demoAutoAlign && demoState_ >= 0) || (crownDemo_ && crownDemo_->state < 100);
+        return tasks_.busy() || !queue_.empty() || (designerOptions_.demoAutoAlign && demoState_ >= 0) || (crownDemo_ && crownDemo_->state < 100) ||
+               (abutmentDemo_ && abutmentDemo_->state < 100);
     }
 
 private:
@@ -181,6 +185,7 @@ private:
     bool showHelp_ = false;
     int demoState_ = 0;
     std::optional<CrownDemo> crownDemo_;
+    std::optional<AbutmentDemo> abutmentDemo_;
 };
 
 } // namespace occlusa::designer

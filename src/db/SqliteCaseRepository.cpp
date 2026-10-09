@@ -51,7 +51,6 @@ CREATE TABLE IF NOT EXISTS restorations (
     type            TEXT NOT NULL,
     material        TEXT NOT NULL DEFAULT '',
     shade           TEXT NOT NULL DEFAULT '',
-    implant_system  TEXT NOT NULL DEFAULT '',
     notes           TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_restorations_case ON restorations(case_id);
@@ -209,7 +208,7 @@ std::optional<CaseRecord> SqliteCaseRepository::loadCase(const std::string& uuid
     r.lockedBy = st.getText(18);
     r.lockedUtc = st.getText(19);
 
-    auto rs = db_.prepare("SELECT id, tooth, type, material, shade, implant_system, notes FROM restorations WHERE case_id = ? ORDER BY tooth, id");
+    auto rs = db_.prepare("SELECT id, tooth, type, material, shade, notes FROM restorations WHERE case_id = ? ORDER BY tooth, id");
     rs.bind(1, r.id);
     while (rs.step()) {
         Restoration x;
@@ -218,8 +217,7 @@ std::optional<CaseRecord> SqliteCaseRepository::loadCase(const std::string& uuid
         x.type = rs.getText(2);
         x.material = rs.getText(3);
         x.shade = rs.getText(4);
-        x.implantSystem = rs.getText(5);
-        x.notes = rs.getText(6);
+        x.notes = rs.getText(5);
         r.restorations.push_back(std::move(x));
     }
     auto fs_ = db_.prepare("SELECT id, role, rel_path, label, added_utc FROM case_files WHERE case_id = ? ORDER BY id");
@@ -275,12 +273,12 @@ std::string SqliteCaseRepository::nextCaseNumber()
 void SqliteCaseRepository::writeChildren(std::int64_t caseId, const CaseRecord& r)
 {
     db_.prepare("DELETE FROM restorations WHERE case_id = ?").bind(1, caseId).run();
-    auto ins = db_.prepare("INSERT INTO restorations(case_id, tooth, type, material, shade, implant_system, notes) VALUES(?,?,?,?,?,?,?)");
+    auto ins = db_.prepare("INSERT INTO restorations(case_id, tooth, type, material, shade, notes) VALUES(?,?,?,?,?,?)");
     for (const auto& x : r.restorations) {
         if (!dental::isValidFdi(x.tooth))
             throw DbError(std::format("Invalid tooth number {}", x.tooth));
         ins.reset();
-        ins.bind(1, caseId).bind(2, x.tooth).bind(3, x.type).bind(4, x.material).bind(5, x.shade).bind(6, x.implantSystem).bind(7, x.notes).run();
+        ins.bind(1, caseId).bind(2, x.tooth).bind(3, x.type).bind(4, x.material).bind(5, x.shade).bind(6, x.notes).run();
     }
     db_.prepare("DELETE FROM case_files WHERE case_id = ?").bind(1, caseId).run();
     auto insF = db_.prepare("INSERT INTO case_files(case_id, role, rel_path, label, added_utc) VALUES(?,?,?,?,?)");

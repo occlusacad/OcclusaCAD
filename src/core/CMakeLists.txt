@@ -8,6 +8,7 @@ add_library(occlusa_core STATIC
     KdTree.cpp
     Log.cpp
     Mesh.cpp
+    MeshBoolean.cpp
     MeshBvh.cpp
     MeshTopology.cpp
     Platform.cpp
@@ -23,6 +24,9 @@ add_library(occlusa_core STATIC
     crown/InsertionAxis.cpp
     crown/Margin.cpp
     crown/ToothLibrary.cpp
+    implant/Abutment.cpp
+    implant/ImplantLibrary.cpp
+    implant/ScanBodyFit.cpp
     dicom/DicomCodecs.cpp
     dicom/DicomDataset.cpp
     dicom/DicomSeries.cpp

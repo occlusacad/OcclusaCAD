@@ -99,6 +99,27 @@ All geometry lives in `core/crown` (no GUI), in the coordinates of the scan cont
 
 The `RestorationDesign` state (margin vertex ids, axis, parameters, displacement) is part of the design JSON, as are the bridges' connector settings and common axis. Derived geometry is rebuilt on load once the scan analysis is ready. Saved vertex ids are only reused if the scan's vertex count matches.
 
+## Custom abutments (`core/implant`)
+
+* **Libraries** (`ImplantLibrary`): `ImplantLibraryRegistry` holds the built-in generic library (generated with Manifold) and library folders. Connections are loaded on first use and cached. The interface's top circle (`measureInterfaceTop`: highest level, outer radius there) is where the abutment starts. The format is described in [IMPLANT_LIBRARIES.md](IMPLANT_LIBRARIES.md).
+* **Scan body matching** (`ScanBodyFit`):
+  1. The library scan body is sampled evenly over its surface; only the top 6 mm is used, since the rest is hidden in the gingiva.
+  2. It is placed at the clicked point along the mean surface normal there, in 12 rotations about the axis.
+  3. Each placement is refined by point-to-plane ICP (`refineIcp`) against the scan vertices within 13 mm.
+  4. Fits are compared by point-to-plane distance. Point-to-point distance would mostly measure the scan's vertex spacing.
+* **Abutment geometry** (`Abutment`): `AbutmentShape` holds per control point (9, evenly spaced) the margin radius and height, the mid offset, and the core outline (free when unlocked). `buildAbutment` evaluates closed Catmull-Rom splines at 108 azimuths. Each column is a profile:
+  1. a quadratic Bézier through the mid point, from the interface's top circle to the margin;
+  2. the shoulder with a rounded inner corner;
+  3. the core wall;
+  4. a rounded top down to the screw channel;
+  5. the channel down into the interface, closing inside it.
+
+  The grid is a closed, consistently oriented solid; tests check this for edited shapes too. `finishAbutment` unites it with the library interface (Manifold), so the interface stays exactly as provided, and checks the optional minimum-thickness and blank solids by ray parity.
+* **Designer** (`AbutmentSteps`):
+  * `ImplantRestoration` holds the connection, the implant position (implant frame → scan) and the shape. It is saved in the design JSON with the tooth in the configured numbering.
+  * Handles are dragged in the 3D view. The step sets `View3D::blockOrbit` while a drag is on, so the camera stays still.
+  * The scan is shown without the scanned scan body (triangles within 0.12 mm of the matched library scan body are left out), as an overlay. The scan itself is hidden only for display (`ScanObject::stepHidden`, not saved).
+
 ## Workflow engine
 
 * `core/Workflow` declares every **step** (id, title, group, guidance, implemented flag) and the **workflows** as ordered step lists: `implant_planning`, `surgical_guide`, `custom_abutment` and `crown_bridge`.
@@ -168,14 +189,17 @@ The `RestorationDesign` state (margin vertex ids, axis, parameters, displacement
 * `designer_crown_e2e` (same option) opens the phantom crown case. It detects the margin from one click, sets the axis, designs and saves the crown. It fails if the margin deviates more than 0.3 mm from the analytic margin, or if the crown is not watertight or not saved to the case.
 
   It then does the same for the bridge case 35-36-37: two margins, the common axis, the pontic, connectors, and the merged bridge saved as one STL.
+* `designer_abutment_e2e` (same option) opens the phantom abutment case, chooses the generic RP 4.1 connection and matches the scan body from a click. It fails if the implant platform is off by more than 0.05 mm (or the axis by more than 1°), or if the default abutment is not united with the interface and saved. It then repeats this with the library exported to a lab library folder by `occlusa_implantlib`.
+* Unit tests for implant libraries (closed generic geometry, the top circle, the `library.json` round trip), abutment shapes (default margin 0.5 mm wider, mid points controlling convexity, the locked core following the margin, unlocking, thin-wall warnings, the union with the interface) and scan body matching on a rotated synthetic scan.
 
 ## Roadmap
 
-1. Crown & bridge: inlays/onlays and veneers, per-connector editing and pontic shape options (ovate, sanitary), crowns on implants (custom abutment workflow), a larger tooth library (morphable library teeth from scanned shapes), a dynamic occlusion check, and margin re-meshing for scans coarser than the margin.
-2. Panoramic curve and reconstruction, then nerve canal tracing.
-3. An implant library (vendor-neutral format) and placement with safety distances; virtual teeth.
-4. Sleeve setup and surgical guide design (offset surface from the scan, sleeve holes, Boolean operations).
-5. The cloud backend and user accounts.
-6. JPEG 2000 / JPEG-LS DICOM, and DICOMDIR browsing.
-7. Packaging: macOS app bundles and notarisation, a Windows MSI, Linux AppImage/Flatpak, file associations, and an icon set.
-8. A Metal/Vulkan renderer backend.
+1. Implant restorations: exocad and 3Shape implant library import, crowns on custom abutments and screw-retained crowns, angled screw channels, abutment emergence fitted to the gingiva scan.
+2. Crown & bridge: inlays/onlays and veneers, per-connector editing and pontic shape options (ovate, sanitary), a larger tooth library (morphable library teeth from scanned shapes), a dynamic occlusion check, and margin re-meshing for scans coarser than the margin.
+3. Panoramic curve and reconstruction, then nerve canal tracing.
+4. Implant placement on the CBCT with the implant libraries, with safety distances; virtual teeth.
+5. Sleeve setup and surgical guide design (offset surface from the scan, sleeve holes, Boolean operations).
+6. The cloud backend and user accounts.
+7. JPEG 2000 / JPEG-LS DICOM, and DICOMDIR browsing.
+8. Packaging: macOS app bundles and notarisation, a Windows MSI, Linux AppImage/Flatpak, file associations, and an icon set.
+9. A Metal/Vulkan renderer backend.

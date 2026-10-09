@@ -61,6 +61,10 @@ int main(int argc, char** argv)
     if (auto e = cl.get("demo-max-margin-error"))
         so.demoMaxMarginError = std::stod(*e);
     so.demoLibrary = cl.get("demo-library").value_or("");
+    if (auto a = cl.get("demo-abutment"))
+        so.demoAbutmentTruth = platform::pathFromUtf8(*a);
+    if (auto e = cl.get("demo-max-implant-error"))
+        so.demoMaxImplantError = std::stod(*e);
     so.demoSave = cl.has("demo-save");
     if (auto e = cl.get("demo-max-error"))
         so.demoMaxError = std::stod(*e);

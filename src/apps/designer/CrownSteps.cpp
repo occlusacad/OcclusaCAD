@@ -2546,7 +2546,7 @@ bool allRestorationsExported(const DesignerApp& app)
 bool isGeneratedRestorationFile(const std::string& rel)
 {
     auto starts = [&](std::string_view p) { return rel.rfind(p, 0) == 0; };
-    return (starts("design/crown_") || starts("design/bridge_")) && rel.size() > 4 && rel.compare(rel.size() - 4, 4, ".stl") == 0;
+    return (starts("design/crown_") || starts("design/bridge_") || starts("design/abutment_")) && rel.size() > 4 && rel.compare(rel.size() - 4, 4, ".stl") == 0;
 }
 
 // ---------------------------------------------------------------------------

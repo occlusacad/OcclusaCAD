@@ -1,0 +1,3 @@
+add_executable(occlusa_implantlib main.cpp)
+target_link_libraries(occlusa_implantlib PRIVATE occlusa_core)
+occlusa_set_compile_options(occlusa_implantlib)

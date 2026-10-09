@@ -58,6 +58,7 @@ public:
     std::optional<glm::dvec3> gizmoPivot; // or: translate-only gizmo at this world point (e.g. a bridge connector)
     int gizmoOperation = 0;      // 0 translate, 1 rotate
     std::optional<glm::dmat4> gizmoDelta; // set when the gizmo moved this frame
+    bool blockOrbit = false;     // a step is dragging a handle with the left button (no orbit, no click)
 
     // Draw into a region of the current window.
     ViewEvents draw(RenderServices& rs, const ImVec2& size, const OverlayFn& overlay = {});

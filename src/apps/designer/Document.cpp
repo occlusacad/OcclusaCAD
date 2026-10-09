@@ -257,6 +257,82 @@ SavedRestoration restorationFromJson(const json& o, dental::Numbering n)
     return r;
 }
 
+json shapeToJson(const implant::AbutmentShape& s)
+{
+    auto arr = [](const std::array<double, implant::kControlPoints>& a) { return std::vector<double>(a.begin(), a.end()); };
+    return {{"marginRadius", arr(s.marginRadius)},
+            {"marginHeight", arr(s.marginHeight)},
+            {"midOffset", arr(s.midOffset)},
+            {"shoulderWidth", s.shoulderWidth},
+            {"coreHeight", s.coreHeight},
+            {"taperDeg", s.taperDeg},
+            {"coreLocked", s.coreLocked},
+            {"coreRadius", arr(s.coreRadius)},
+            {"coreTop", arr(s.coreTop)},
+            {"screwChannelDiameter", s.screwChannelDiameter},
+            {"phase", s.phase}};
+}
+
+implant::AbutmentShape shapeFromJson(const json& o)
+{
+    implant::AbutmentShape s;
+    auto arr = [&](const char* key, std::array<double, implant::kControlPoints>& out) {
+        if (!o.contains(key) || !o[key].is_array() || o[key].size() != out.size())
+            return;
+        for (std::size_t i = 0; i < out.size(); ++i)
+            out[i] = o[key][i].get<double>();
+    };
+    arr("marginRadius", s.marginRadius);
+    arr("marginHeight", s.marginHeight);
+    arr("midOffset", s.midOffset);
+    arr("coreRadius", s.coreRadius);
+    arr("coreTop", s.coreTop);
+    s.shoulderWidth = o.value("shoulderWidth", s.shoulderWidth);
+    s.coreHeight = o.value("coreHeight", s.coreHeight);
+    s.taperDeg = o.value("taperDeg", s.taperDeg);
+    s.coreLocked = o.value("coreLocked", s.coreLocked);
+    s.screwChannelDiameter = o.value("screwChannelDiameter", s.screwChannelDiameter);
+    s.phase = o.value("phase", s.phase);
+    return s;
+}
+
+json implantToJson(const SavedImplant& r, dental::Numbering n)
+{
+    json o;
+    o["tooth"] = toFile(r.tooth, n);
+    o["type"] = r.type;
+    o["scan"] = r.scanSource;
+    o["library"] = r.libraryId;
+    o["connection"] = r.connectionId;
+    if (r.implantToScan)
+        o["implantToScan"] = matToJson(*r.implantToScan);
+    o["fitRms"] = r.fitRms;
+    o["fitWithin"] = r.fitWithin;
+    if (r.shape)
+        o["abutment"] = shapeToJson(*r.shape);
+    if (!r.abutmentFile.empty())
+        o["abutmentFile"] = r.abutmentFile;
+    return o;
+}
+
+SavedImplant implantFromJson(const json& o, dental::Numbering n)
+{
+    SavedImplant r;
+    r.tooth = fromFile(o.value("tooth", 0), n);
+    r.type = o.value("type", "");
+    r.scanSource = o.value("scan", "");
+    r.libraryId = o.value("library", "");
+    r.connectionId = o.value("connection", "");
+    if (o.contains("implantToScan"))
+        r.implantToScan = matFromJson(o["implantToScan"]);
+    r.fitRms = o.value("fitRms", 0.0);
+    r.fitWithin = o.value("fitWithin", 0.0);
+    if (o.contains("abutment"))
+        r.shape = shapeFromJson(o["abutment"]);
+    r.abutmentFile = o.value("abutmentFile", "");
+    return r;
+}
+
 } // namespace
 
 std::string DesignState::toJson() const
@@ -327,6 +403,12 @@ std::string DesignState::toJson() const
         }
         j["bridges"] = bj;
     }
+    if (!implants.empty()) {
+        json ij = json::array();
+        for (const auto& r : implants)
+            ij.push_back(implantToJson(r, numbering));
+        j["implants"] = ij;
+    }
     return j.dump(1);
 }
 
@@ -382,6 +464,9 @@ DesignState DesignState::fromJson(const std::string& text)
     if (j.contains("restorations"))
         for (const auto& o : j["restorations"])
             st.restorations.push_back(restorationFromJson(o, st.numbering));
+    if (j.contains("implants"))
+        for (const auto& o : j["implants"])
+            st.implants.push_back(implantFromJson(o, st.numbering));
     if (j.contains("bridges"))
         for (const auto& o : j["bridges"]) {
             SavedBridge b;

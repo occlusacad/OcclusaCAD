@@ -874,7 +874,7 @@ void DbApp::drawToothCard()
         else if (it != draft_.restorations.end())
             it->type = selectedType_;
         else
-            draft_.restorations.push_back(db::Restoration{0, tooth, selectedType_, "", "", "", ""});
+            draft_.restorations.push_back(db::Restoration{0, tooth, selectedType_, "", "", ""});
         onRestorationsChanged();
     }
 
@@ -883,7 +883,7 @@ void DbApp::drawToothCard()
         if (ImGui::BeginTable("##rest", 5, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
             ImGui::TableSetupColumn("Tooth", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 3.0f);
             ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthStretch, 1.4f);
-            ImGui::TableSetupColumn("Material / implant", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+            ImGui::TableSetupColumn("Material", ImGuiTableColumnFlags_WidthStretch, 1.4f);
             ImGui::TableSetupColumn("Shade", ImGuiTableColumnFlags_WidthStretch, 0.6f);
             ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFrameHeight());
             ImGui::TableHeadersRow();
@@ -908,11 +908,8 @@ void DbApp::drawToothCard()
                 }
                 ImGui::TableSetColumnIndex(2);
                 ImGui::SetNextItemWidth(-1);
-                const bool implant = t && std::string_view(t->category) != "Crown & bridge";
-                if (implant)
-                    ImGui::InputTextWithHint("##sys", "Implant system", &r.implantSystem);
-                else
-                    ImGui::InputTextWithHint("##mat", "Material", &r.material);
+                // The implant system is chosen in OcclusaCAD (implant library), not here.
+                ImGui::InputTextWithHint("##mat", "Material", &r.material);
                 ImGui::TableSetColumnIndex(3);
                 ImGui::SetNextItemWidth(-1);
                 ImGui::InputTextWithHint("##shade", "Shade", &r.shade);

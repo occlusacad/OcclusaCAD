@@ -62,8 +62,13 @@ Both run on **Windows, macOS and Linux** and support **light and dark mode** (fo
     - **Connectors** are elliptical, with a minimum cross-section area (default 9 mm², zirconia posterior), a height/width ratio and an embrasure clearance. A warning appears when a connector does not fit between the gingiva and the marginal ridges.
     - **Each connector can be moved and resized**: select it in the list or click it in the 3D view, then drag the gizmo or use the sliders (area, height/width, length, occlusal/gingival, bucco-lingual and mesio-distal offset). Edits are relative to the automatic placement, so they survive changes to the units. They are checked against the embrasure and the marginal ridges, can be undone or reset, and are saved with the design.
     - The units are **merged into one watertight solid** with the Manifold boolean library. Nothing is allowed to reach into a preparation's space. The merged bridge reports the measured cross-section of every connector.
-- **Save**: the design state goes into the case database. Crowns and merged bridges (`bridge_35-36-37.stl`) are exported as STL to the case's `design/` folder in the coordinates of their scan; aligned scans in CBCT coordinates. Files opened from outside the case are copied into it.
-- Planned tools appear in the workflow as placeholders: panoramic curve, nerve canal, virtual teeth, implant placement, sleeves, guide design and abutment design. Inlays/onlays and veneers are listed in the case but not designed yet.
+- **Custom abutments** (implant restorations; see [docs/IMPLANT_LIBRARIES.md](docs/IMPLANT_LIBRARIES.md)):
+  - **Implant library picker** in the designer (manufacturer > system > platform, with search and details). The library provides the interface to the implant, which can never be changed, and the scan body. Screw channel, minimum thickness and blank geometry are optional. Built-in generic test library, plus lab libraries in an open format (`library.json` + STL).
+  - **Scan body alignment**: click on the top of the scan body; the library scan body is matched by ICP in 12 rotations. On the phantom the implant platform is found within 0.01 mm.
+  - **Abutment design**: a smooth emergence profile from the interface's top circle, shaped by 9 margin points and 9 mid points (convex/concave), with the default margin 0.5 mm wider than the interface and 0.5 mm below the gingiva. The core follows the margin (shoulder, height, taper) until unlocked, then its 9 points move freely. Straight screw channel, wall-thickness map and checks.
+  - Exported as one solid: the designed part united with the unchanged interface (`abutment_36.stl`).
+- **Save**: the design state goes into the case database. Crowns, abutments and merged bridges (`bridge_35-36-37.stl`) are exported as STL to the case's `design/` folder in the coordinates of their scan; aligned scans in CBCT coordinates. Files opened from outside the case are copied into it.
+- Planned tools appear in the workflow as placeholders: panoramic curve, nerve canal, virtual teeth, implant placement, sleeves and guide design. Inlays/onlays and veneers are listed in the case but not designed yet.
 
 **Case database**
 - SQLite on a local disk or a **network share** (tuned for it: rollback journal instead of WAL, `BEGIN IMMEDIATE`, busy timeout). Paths are stored relative to the case folder, so different drive letters and mount points work.
@@ -135,7 +140,9 @@ For crown & bridge it writes `crown/`:
 - the upper jaw in occlusion as the antagonist;
 - the analytic margin lines (`crown_truth.json`, `bridge_truth.json`).
 
-With `--create-case` the data sets become cases: "Phantom, Demo" (implant planning), "Phantom, Crown" (crown on 46) and "Phantom, Bridge" (bridge 35-36-37).
+For custom abutments it writes `abutment/`: the lower jaw with a generic RP 4.1 scan body on an implant at 36, and the true implant position (`abutment_truth.json`).
+
+With `--create-case` the data sets become cases: "Phantom, Demo" (implant planning), "Phantom, Crown" (crown on 46), "Phantom, Bridge" (bridge 35-36-37) and "Phantom, Abutment" (custom abutment on 36).
 
 ```bash
 build/bin/occlusa_phantom --out /tmp/phantom --create-case /tmp/occlusacad-data     # also creates demo cases
@@ -160,6 +167,8 @@ cmake -S . -B build -DOCCLUSACAD_HEADLESS_TESTS=ON && ctest --test-dir build -R 
 
 With `bridge_truth.json` and the bridge case, the demo does both abutments, then the common axis, the bridge design and the merge. It then enlarges and raises one connector and merges again. It fails unless the merged bridges are watertight and every connector meets its (edited) area.
 
+`--demo-abutment <abutment_truth.json>` (with the abutment case) chooses the truth file's implant connection, clicks on the scan body, compares the implant position with the ground truth (`--demo-max-implant-error`), designs the default abutment and checks that it is united with the interface.
+
 ```bash
 build/bin/OcclusaCAD --data-root /tmp/occlusacad-data --case <crown case uuid> \
     --demo-crown /tmp/phantom/crown/crown_truth.json --demo-max-margin-error 0.3 --demo-save --screenshot crown.png
@@ -170,6 +179,7 @@ build/bin/OcclusaCAD --data-root /tmp/occlusacad-data --case <crown case uuid> \
 ```
 src/core/         domain logic, no GUI: DICOM, STL, volume, iso-surface, kd-tree, BVH, registration, workflows, platform
 src/core/crown/   crown & bridge: margin detection, die, insertion axis, tooth library, crown builder, bridges
+src/core/implant/ implant libraries, scan body matching, custom abutment geometry
 src/db/           case database: repository interface, SQLite backend, local file store, cloud stub
 src/gfx/          OpenGL renderer: camera, MSAA targets, mesh shading, volume ray casting, MPR slices
 src/ui/           application shell (GLFW + Dear ImGui), light/dark themes, fonts, dialogs, widgets, tooth chart
@@ -177,6 +187,7 @@ src/apps/casedb/  OcclusaCAD DB
 src/apps/designer/ OcclusaCAD (document, views, workflow steps)
 tools/phantom/    synthetic test data generator
 tools/toothlib/   tooth library utility (list, export, create, info, preview)
+tools/implantlib/ implant library utility (list, export, info)
 tests/            unit tests (doctest) and the headless end-to-end tests
 third_party/      vendored dependencies (see third_party/README.md)
 docs/             architecture notes and screenshots
@@ -188,4 +199,4 @@ OcclusaCAD is licensed under the GNU AGPL v3 (see `LICENSE`). Vendored dependenc
 
 ## Roadmap
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#roadmap). Next up: inlays/onlays and veneers, crowns on implants, panoramic curve, nerve tracing, an implant library and placement, then guide design. After that come the cloud backend, JPEG 2000 and JPEG-LS DICOM, and app bundles and installers.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#roadmap). Next up: exocad and 3Shape implant library import, crowns on custom abutments, inlays/onlays and veneers, panoramic curve, nerve tracing, an implant library and placement, then guide design. After that come the cloud backend, JPEG 2000 and JPEG-LS DICOM, and app bundles and installers.

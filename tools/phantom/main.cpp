@@ -4,7 +4,9 @@
 // missing first molar as implant site), an intraoral-style surface scan (teeth + gingiva)
 // in its own scanner coordinate system, and the ground-truth scan->CBCT transform.
 // A second data set (crown/) has a shoulder preparation on 46 with the opposing upper
-// jaw and the analytic margin line, for the crown & bridge workflow.
+// jaw and the analytic margin line, for the crown & bridge workflow. A third (abutment/) has
+// a scan body of the generic implant library on an implant at 36, for the custom abutment
+// workflow, with the true implant position.
 // Optionally creates demo cases in a OcclusaCAD data folder.
 //
 //   occlusa_phantom --out <dir> [--voxel 0.4] [--seed 7]
@@ -19,6 +21,7 @@
 #include "core/StlIO.h"
 #include "core/Time.h"
 #include "core/dicom/DicomWriter.h"
+#include "core/implant/ImplantLibrary.h"
 #include "db/CaseRepository.h"
 
 #include <json.hpp>
@@ -410,7 +413,40 @@ Mesh makeAntagonistScan(const Phantom& ph)
     return m;
 }
 
-int createCases(const fs::path& dataRoot, const fs::path& dicomDir, const fs::path& scanPath, const fs::path& crownDir, int extra)
+// Custom abutment data: the lower jaw (36 missing) with a generic RP 4.1 scan body screwed onto
+// an implant at 36, in world (phantom) coordinates. Returns the implant frame (implant -> world).
+constexpr int kImplantTooth = 36;
+const char* const kImplantConnection = "rp41";
+constexpr double kImplantPlatform = 4.1;
+
+glm::dmat4 implantFrame(const Phantom& ph)
+{
+    const Tooth& a = ph.tooth(35);
+    const Tooth& b = ph.tooth(37);
+    const glm::dvec2 c = (a.center + b.center) * 0.5;
+    // Tilted 6 degrees, rotated about its axis so the scan body flat is not aligned with anything.
+    glm::dmat4 m = glm::translate(glm::dmat4(1.0), glm::dvec3(c, kGumZ - 2.2));
+    m = glm::rotate(m, glm::radians(6.0), glm::normalize(glm::dvec3(0.6, 1.0, 0.0)));
+    m = glm::rotate(m, glm::radians(37.0), glm::dvec3(0, 0, 1));
+    return m;
+}
+
+Mesh makeScanBodyScan(const Phantom& ph, const glm::dmat4& implant)
+{
+    const glm::dmat4 toImplant = glm::inverse(implant);
+    return surfaceFromSdf(glm::dvec3(-36.0, -32.0, kGumZ - 6.0), glm::dvec3(36.0, 24.0, kGumZ + 11.0), 0.15,
+                          [&](const glm::dvec3& p) {
+                              const double archDist = ph.arch().distance(glm::dvec2(p));
+                              if (archDist >= 14.0)
+                                  return 50.0;
+                              const double jaw = smin(ph.sdTooth(p), ph.sdGum(p, archDist), 0.6);
+                              return std::min(jaw, implant::genericScanBodySdf(transformPoint(toImplant, p), kImplantPlatform));
+                          },
+                          true);
+}
+
+int createCases(const fs::path& dataRoot, const fs::path& dicomDir, const fs::path& scanPath, const fs::path& crownDir, const fs::path& abutmentDir,
+                int extra)
 {
     AppConfig cfg;
     cfg.dataRoot = dataRoot;
@@ -427,7 +463,7 @@ int createCases(const fs::path& dataRoot, const fs::path& dicomDir, const fs::pa
     c.dueDate = time::todayLocalDate();
     c.workflow = "implant_planning";
     c.notes = "Synthetic phantom: missing 36, plan one implant. Ground truth registration in phantom output folder.";
-    c.restorations.push_back(db::Restoration{0, 36, "implant_planning", "", "", "Generic 4.1 x 10 mm", ""});
+    c.restorations.push_back(db::Restoration{0, 36, "implant_planning", "", "", "Planned implant: generic 4.1 x 10 mm"});
     c = repo->createCase(c);
     const std::string dicomRel = repo->files().importDirectory(c, dicomDir, db::FileRole::Dicom);
     const std::string scanRel = repo->files().importFile(c, scanPath, db::FileRole::ScanLower);
@@ -447,7 +483,7 @@ int createCases(const fs::path& dataRoot, const fs::path& dicomDir, const fs::pa
     cc.technician = platform::userName();
     cc.dueDate = time::todayLocalDate();
     cc.notes = "Synthetic phantom: shoulder preparation on 46, upper jaw as antagonist. Ground-truth margin in crown/crown_truth.json.";
-    cc.restorations.push_back(db::Restoration{0, kPrepTooth, "anatomic_crown", "Zirconia", "A2", "", ""});
+    cc.restorations.push_back(db::Restoration{0, kPrepTooth, "anatomic_crown", "Zirconia", "A2", ""});
     cc = repo->createCase(cc);
     const std::string lowerRel = repo->files().importFile(cc, crownDir / "lower_prep.stl", db::FileRole::ScanLower);
     const std::string upperRel = repo->files().importFile(cc, crownDir / "upper.stl", db::FileRole::ScanUpper);
@@ -467,9 +503,9 @@ int createCases(const fs::path& dataRoot, const fs::path& dicomDir, const fs::pa
     bc.technician = platform::userName();
     bc.dueDate = time::todayLocalDate();
     bc.notes = "Synthetic phantom: three-unit bridge 35-37 with 36 as pontic. Ground-truth margins in crown/bridge_truth.json.";
-    bc.restorations.push_back(db::Restoration{0, 35, "anatomic_crown", "Zirconia", "A3", "", ""});
-    bc.restorations.push_back(db::Restoration{0, kBridgePontic, "pontic", "Zirconia", "A3", "", ""});
-    bc.restorations.push_back(db::Restoration{0, 37, "anatomic_crown", "Zirconia", "A3", "", ""});
+    bc.restorations.push_back(db::Restoration{0, 35, "anatomic_crown", "Zirconia", "A3", ""});
+    bc.restorations.push_back(db::Restoration{0, kBridgePontic, "pontic", "Zirconia", "A3", ""});
+    bc.restorations.push_back(db::Restoration{0, 37, "anatomic_crown", "Zirconia", "A3", ""});
     bc = repo->createCase(bc);
     const std::string bLower = repo->files().importFile(bc, crownDir / "lower_prep.stl", db::FileRole::ScanLower);
     const std::string bUpper = repo->files().importFile(bc, crownDir / "upper.stl", db::FileRole::ScanUpper);
@@ -477,6 +513,24 @@ int createCases(const fs::path& dataRoot, const fs::path& dicomDir, const fs::pa
     bc.files.push_back(db::CaseFile{0, db::FileRole::ScanUpper, bUpper, "Upper jaw", ""});
     repo->updateCase(bc);
     std::printf("Created bridge demo case %s (%s)\n", bc.caseNumber.c_str(), bc.uuid.c_str());
+
+    // Custom abutment on an implant at 36 (scan body scan).
+    db::CaseRecord ac;
+    ac.patientFirstName = "Abutment";
+    ac.patientLastName = "Phantom";
+    ac.patientBirthDate = "1972-11-08";
+    ac.patientReference = "PH-0004";
+    ac.practice = "Riverside Dental Group";
+    ac.dentist = "Dr. A. Moreno";
+    ac.technician = platform::userName();
+    ac.dueDate = time::todayLocalDate();
+    ac.notes = "Synthetic phantom: OcclusaCAD Generic RP 4.1 scan body on an implant at 36. Ground truth in abutment/abutment_truth.json.";
+    ac.restorations.push_back(db::Restoration{0, kImplantTooth, "custom_abutment", "Titanium", "", ""});
+    ac = repo->createCase(ac);
+    const std::string aLower = repo->files().importFile(ac, abutmentDir / "lower_scanbody.stl", db::FileRole::ScanLower);
+    ac.files.push_back(db::CaseFile{0, db::FileRole::ScanLower, aLower, "Lower jaw (scan body 36)", ""});
+    repo->updateCase(ac);
+    std::printf("Created abutment demo case %s (%s)\n", ac.caseNumber.c_str(), ac.uuid.c_str());
 
     // Additional cases without data for a realistic case list.
     struct Demo {
@@ -503,7 +557,7 @@ int createCases(const fs::path& dataRoot, const fs::path& dicomDir, const fs::pa
         r.technician = platform::userName();
         std::vector<std::string> keys;
         for (const auto& [tooth, type] : demos[i].teeth) {
-            r.restorations.push_back(db::Restoration{0, tooth, type, "", "", "", ""});
+            r.restorations.push_back(db::Restoration{0, tooth, type, "", "", ""});
             keys.emplace_back(type);
         }
         r.workflow = "";
@@ -609,8 +663,43 @@ int main(int argc, char** argv)
             std::ofstream(crownDir / "bridge_truth.json") << bt.dump(1);
         }
 
+        // Custom abutment data set: scan body on an implant at 36, in its own scanner coordinates.
+        const fs::path abutmentDir = out / "abutment";
+        fs::create_directories(abutmentDir);
+        {
+            glm::dmat4 pose = glm::rotate(glm::dmat4(1.0), glm::radians(20.0 + 25.0 * u(rng)), glm::normalize(glm::dvec3(u(rng), u(rng), u(rng))));
+            pose[3] = glm::dvec4(10.0 * u(rng), 10.0 * u(rng), 10.0 * u(rng), 1.0);
+            const glm::dmat4 toScanner = glm::inverse(pose);
+            const glm::dmat4 implantWorld = implantFrame(ph);
+            Mesh mesh = makeScanBodyScan(ph, implantWorld);
+            for (auto& p : mesh.positions)
+                p = glm::vec3(transformPoint(toScanner, glm::dvec3(p)));
+            mesh.computeVertexNormals();
+            writeStlBinary(abutmentDir / "lower_scanbody.stl", mesh, glm::dmat4(1.0), "OcclusaCAD phantom lower jaw, scan body on 36");
+            std::printf("Wrote %s (%zu triangles)\n", (abutmentDir / "lower_scanbody.stl").string().c_str(), mesh.triangleCount());
+            const glm::dmat4 implantToScan = toScanner * implantWorld;
+            nlohmann::json at;
+            at["note"] = "Coordinates of lower_scanbody.stl (mm). implantToScan maps the implant frame (platform at the origin, +z out of "
+                         "the implant) into the scan. click: a point on the top of the scan body.";
+            at["tooth"] = kImplantTooth;
+            at["library"] = implant::kGenericLibrary;
+            at["connection"] = kImplantConnection;
+            const glm::dvec3 platform = transformPoint(implantToScan, glm::dvec3(0.0));
+            const glm::dvec3 axis = glm::normalize(transformVector(implantToScan, glm::dvec3(0, 0, 1)));
+            const glm::dvec3 click = transformPoint(implantToScan, glm::dvec3(0.3, -0.2, 10.0));
+            at["platform"] = {platform.x, platform.y, platform.z};
+            at["axis"] = {axis.x, axis.y, axis.z};
+            at["click"] = {click.x, click.y, click.z};
+            std::vector<double> m;
+            for (int c = 0; c < 4; ++c)
+                for (int r = 0; r < 4; ++r)
+                    m.push_back(implantToScan[c][r]);
+            at["implantToScan_columnMajor"] = m;
+            std::ofstream(abutmentDir / "abutment_truth.json") << at.dump(1);
+        }
+
         if (auto root = cl.get("create-case"))
-            return createCases(platform::pathFromUtf8(*root), dicomDir, scanPath, crownDir, std::stoi(cl.get("extra-cases").value_or("6")));
+            return createCases(platform::pathFromUtf8(*root), dicomDir, scanPath, crownDir, abutmentDir, std::stoi(cl.get("extra-cases").value_or("6")));
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;

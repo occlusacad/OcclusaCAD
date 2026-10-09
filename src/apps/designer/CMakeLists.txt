@@ -1,5 +1,6 @@
 add_executable(OcclusaCAD
     main.cpp
+    AbutmentSteps.cpp
     CrownSteps.cpp
     Document.cpp
     StepScanAlignment.cpp

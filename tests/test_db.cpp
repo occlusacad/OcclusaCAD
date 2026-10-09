@@ -21,8 +21,8 @@ CaseRecord sampleCase()
     r.practice = "Smile Dental";
     r.dentist = "Dr. Ortiz";
     r.workflow = "implant_planning";
-    r.restorations.push_back(Restoration{0, 36, "implant_planning", "", "", "Straumann BLX", ""});
-    r.restorations.push_back(Restoration{0, 46, "anatomic_crown", "Zirconia", "A2", "", ""});
+    r.restorations.push_back(Restoration{0, 36, "implant_planning", "", "", "Bone level, 4.1 x 10"});
+    r.restorations.push_back(Restoration{0, 46, "anatomic_crown", "Zirconia", "A2", ""});
     return r;
 }
 } // namespace

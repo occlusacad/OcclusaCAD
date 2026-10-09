@@ -35,8 +35,10 @@ const std::vector<StepInfo>& allSteps()
          "Choose the guided-surgery kit and sleeve offsets for each planned implant.", false},
         {StepId::GuideDesign, "guide_design", "Guide design", "Surgical guide", "Design the surgical guide",
          "Define the guide outline, thickness, inspection windows and connectors.", false},
-        {StepId::ScanBodyAlignment, "scan_body_alignment", "Scan body alignment", "Restoration", "Match scan bodies",
-         "Match library scan bodies to the scanned scan bodies to find the implant positions.", false},
+        {StepId::ScanBodyAlignment, "scan_body_alignment", "Scan body alignment", "Restoration", "Implant system and position",
+         "Choose the implant system and platform from the implant library, then click on the top of the scan body in the scan. "
+         "The library scan body is matched to it, which gives the position and rotation of the implant.",
+         true},
         {StepId::MarginLine, "margin_line", "Margin line", "Restoration", "Detect the preparation margin",
          "Define the preparation margin of each crown. Click on the top of the preparation to detect the margin "
          "automatically, then correct it in Edit mode if needed, or draw it point by point.",
@@ -50,7 +52,9 @@ const std::vector<StepInfo>& allSteps()
          "with adapted contacts. Adjust its shape, contacts and thickness, or sculpt it with the free-form tools.",
          true},
         {StepId::AbutmentDesign, "abutment_design", "Abutment design", "Restoration", "Emergence profile and core",
-         "Design the abutment emergence profile, margin and core.", false},
+         "Shape the abutment on the library interface: drag the margin points (orange) and the emergence points halfway down "
+         "(blue), then set the core the crown sits on. The core follows the margin until you unlock it.",
+         true},
         {StepId::Review, "review", "Review & save", "Finish", "Verify and save the design",
          "Review the result, then save the design to the case. Registered scans are exported in CBCT coordinates.", true},
     };
@@ -82,7 +86,7 @@ const std::vector<WorkflowDef>& allWorkflows()
         {"surgical_guide", "Implant planning + surgical guide", "Implant planning followed by tooth/mucosa supported guide design.",
          {LoadData, VolumeSetup, ScanAlignment, PanoramicCurve, NerveCanal, VirtualTeeth, ImplantPlacement, SleeveSetup, GuideDesign, Review}},
         {"custom_abutment", "Custom abutment", "Custom abutment and screw-retained restorations on implants.",
-         {LoadData, ScanBodyAlignment, MarginLine, AbutmentDesign, CrownDesign, Review}},
+         {LoadData, ScanBodyAlignment, AbutmentDesign, Review}},
         {"crown_bridge", "Crown & bridge", "Tooth-borne crowns, copings, bridges, inlays and veneers.",
          {LoadData, MarginLine, InsertionAxis, CrownDesign, Review}},
     };

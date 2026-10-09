@@ -1,5 +1,6 @@
 #pragma once
 
+#include "apps/designer/AbutmentDesign.h"
 #include "apps/designer/CrownDesign.h"
 #include "core/Dental.h"
 #include "core/Mesh.h"
@@ -66,6 +67,7 @@ struct ScanObject {
     glm::vec3 color{0.9f, 0.78f, 0.66f};
     float opacity = 1.0f;
     bool visible = true;
+    bool stepHidden = false;    // hidden by the current step (shown differently there); not saved
     RegistrationRecord registration;
     std::uint64_t revision = 0; // bumps when the transform changes (cache invalidation)
 
@@ -115,6 +117,15 @@ public:
     {
         return activeRestoration >= 0 && activeRestoration < static_cast<int>(restorations.size()) ? &restorations[static_cast<std::size_t>(activeRestoration)]
                                                                                                     : nullptr;
+    }
+
+    // Implant restorations (custom abutment workflow).
+    std::vector<ImplantRestoration> implants;
+    int activeImplant = 0;
+    std::vector<SavedImplant> pendingImplants; // saved designs waiting for their scans
+    ImplantRestoration* activeImplantRestoration()
+    {
+        return activeImplant >= 0 && activeImplant < static_cast<int>(implants.size()) ? &implants[static_cast<std::size_t>(activeImplant)] : nullptr;
     }
 
     std::map<std::string, DisplayMesh> overlays;
@@ -175,6 +186,7 @@ struct DesignState {
     glm::dvec3 cursor{0.0};
     std::vector<SavedRestoration> restorations;
     std::vector<SavedBridge> bridges;
+    std::vector<SavedImplant> implants;
     // Tooth numbering of the saved file (the saving user's setting). In memory teeth are FDI;
     // toJson writes them in this system and fromJson converts back.
     dental::Numbering numbering = dental::Numbering::FDI;

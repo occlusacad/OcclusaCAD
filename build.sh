@@ -3,7 +3,7 @@
 #
 #   ./build.sh                 check dependencies, configure and build (Release) into ./build
 #   ./build.sh --test          ... and run the unit tests
-#   ./build.sh --demo          ... and create synthetic demo cases (implant, crown, bridge)
+#   ./build.sh --demo          ... and create synthetic demo cases (implant, crown, bridge, abutment)
 #   ./build.sh --demo --run    ... and start OcclusaCAD DB on the demo data
 #
 # Run ./build.sh --help for all options. On Windows, open the folder in Visual Studio 2022 instead.
@@ -224,10 +224,10 @@ echo
 echo "${GREEN}${BOLD}Build complete.${RESET} Programs are in $BIN:"
 echo "  OcclusaCAD DB (case management):  $BIN/OcclusaCADDB"
 echo "  OcclusaCAD (designer):            $BIN/OcclusaCAD"
-echo "  Tools:                            $BIN/occlusa_phantom, $BIN/occlusa_toothlib"
+echo "  Tools:                            $BIN/occlusa_phantom, $BIN/occlusa_toothlib, $BIN/occlusa_implantlib"
 echo
 if [[ $DEMO -eq 1 ]]; then
-    echo "Start with the demo cases (implant planning, crown on 46, bridge 35-36-37):"
+    echo "Start with the demo cases (implant planning, crown on 46, bridge 35-36-37, custom abutment on 36):"
     echo "  $BIN/OcclusaCADDB --data-root \"$DEMO_DIR/data\""
 else
     echo "Start OcclusaCAD DB; on first run it asks for a data folder (local or on a network share):"
