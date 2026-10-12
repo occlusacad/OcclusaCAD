@@ -721,23 +721,6 @@ void startScanBodyFit(DesignerApp& app, int tooth, const glm::dvec3& click)
     });
 }
 
-// Ray through a screen point (inverse of the projector).
-std::optional<Ray> rayAt(const Projector& proj, const ImVec2& mouse)
-{
-    const double w = proj.max.x - proj.min.x, h = proj.max.y - proj.min.y;
-    if (w <= 0.0 || h <= 0.0)
-        return std::nullopt;
-    const double x = (mouse.x - proj.min.x) / w * 2.0 - 1.0, y = 1.0 - (mouse.y - proj.min.y) / h * 2.0;
-    const glm::dmat4 inv = glm::inverse(proj.viewProj);
-    glm::dvec4 a = inv * glm::dvec4(x, y, -1.0, 1.0), b = inv * glm::dvec4(x, y, 1.0, 1.0);
-    a /= a.w;
-    b /= b.w;
-    Ray r;
-    r.origin = glm::dvec3(a);
-    r.direction = glm::normalize(glm::dvec3(b - a));
-    return r;
-}
-
 // ---------------------------------------------------------------------------
 // Scan body alignment
 // ---------------------------------------------------------------------------
@@ -1288,7 +1271,7 @@ private:
         // Dragging.
         if (dragging_) {
             if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                if (auto ray = rayAt(proj, mouse)) {
+                if (auto ray = proj.rayAt(mouse)) {
                     dragTo(*r, *ray, toWorld, shift);
                     r->invalidate();
                     ensureGeometry(app, *r);

@@ -41,7 +41,8 @@ const std::vector<StepInfo>& allSteps()
          true},
         {StepId::MarginLine, "margin_line", "Margin line", "Restoration", "Detect the preparation margin",
          "Define the preparation margin of each crown. Click on the top of the preparation to detect the margin "
-         "automatically, then correct it in Edit mode if needed, or draw it point by point.",
+         "automatically, then correct it in Edit mode: drag points, press Delete over a point to remove it, click on the "
+         "line to add one. Or draw it point by point.",
          true},
         {StepId::InsertionAxis, "insertion_axis", "Insertion axis", "Restoration", "Set the insertion direction",
          "Check the insertion direction of the crown. Undercuts along the axis are shown in yellow to red and are blocked "

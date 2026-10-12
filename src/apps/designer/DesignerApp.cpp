@@ -1521,6 +1521,11 @@ void DesignerApp::drawHelp()
         line("Wheel", "Zoom at the mouse position");
         line("Left click", "Pick a point (alignment step)");
         ImGui::Spacing();
+        ui::subheading("Margin line (Edit)");
+        line("Drag a point", "Move it along the preparation");
+        line("Delete over a point", "Remove it");
+        line("Click on the line", "Add a point");
+        ImGui::Spacing();
         ui::subheading("Slice views");
         line("Left click / drag", "Move the crosshair");
         line("Wheel", "Next / previous slice (Shift: 5 slices)");

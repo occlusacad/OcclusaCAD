@@ -1156,6 +1156,9 @@ public:
 
     void onLeave(DesignerApp& app) override
     {
+        if (RestorationDesign* r = app.doc().active(); r && dragging_ >= 0)
+            finishDrag(app, *r);
+        dragging_ = hovered_ = -1;
         app.view3D(ViewId::Main3D).pickCursor = false;
         setAntagonistVisible(app, true);
         setRestorationsVisible(app, true);
@@ -1178,8 +1181,13 @@ public:
                 mode_ = r->marginClosed() ? 2 : 0;
             }
         }
-        if (RestorationDesign* r = app.doc().active(); r && r->supported() && !r->isPontic())
+        if (RestorationDesign* r = app.doc().active(); r && r->supported() && !r->isPontic()) {
             requestPrepScan(app, r->prepScanId);
+            // A detected margin is ready to edit.
+            if (r->marginClosed() && !wasClosed_ && mode_ == 0)
+                mode_ = 2;
+            wasClosed_ = r->marginClosed();
+        }
     }
 
     void drawPanel(DesignerApp& app) override
@@ -1229,9 +1237,12 @@ public:
         case 0: ui::wrappedMutedText("Click on the top of the preparation. The margin is found automatically by following the "
                                      "preparation edge all the way round."); break;
         case 1: ui::wrappedMutedText("Click points along the margin. Each segment follows the preparation edge. Click the first "
-                                     "point again (or press Close) to finish."); break;
-        default: ui::wrappedMutedText("Click on the scan to move the nearest control point there; the margin re-traces between "
-                                      "its neighbours."); break;
+                                     "point again (or press Close) to finish. Drag a point to move it; point at one and press "
+                                     "Delete to remove it."); break;
+        default:
+            ui::wrappedMutedText("Drag a point to move it along the preparation. Click on the margin line to add a point there. "
+                                 "Point at a point and press Delete to remove it. The margin re-traces between the points.");
+            break;
         }
         ImGui::Spacing();
         const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
@@ -1269,20 +1280,81 @@ public:
             return {};
         return [this, &app](ImDrawList* dl, const Projector& proj) {
             RestorationDesign* r = app.doc().active();
-            if (!r)
+            if (!r) {
+                dragging_ = hovered_ = -1;
+                app.view3D(ViewId::Main3D).blockOrbit = false;
                 return;
+            }
             ScanObject* s = scanById(app, r->prepScanId);
+            auto ps = prepScanFor(app, r->prepScanId);
+            const bool editable = s && ps && mode_ != 0 && !app.tasks().busy() && r->supported() && !r->isPontic();
+            const ImGuiIO& io = ImGui::GetIO();
+            const ImVec2 mouse = io.MousePos;
+            const bool inView = proj.contains(mouse) && ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+            const glm::dvec3 fwd = app.view3D(ViewId::Main3D).camera.forward();
+            const float sc = ImGui::GetStyle().FontScaleDpi;
+
+            // Dragging a point: it follows the mouse over the preparation; the margin re-traces live.
+            if (dragging_ >= 0) {
+                if (!editable || dragging_ >= static_cast<int>(r->controls.size()) || !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    finishDrag(app, *r);
+                } else if (auto ray = proj.rayAt(mouse)) {
+                    if (auto hit = pickOnScan(app, r->prepScanId, *ray)) {
+                        const std::uint32_t v = ps->nearestVertex(*hit);
+                        auto& c = r->controls[static_cast<std::size_t>(dragging_)];
+                        if (v != c) {
+                            c = v;
+                            const auto prepPoint = r->prepPoint;
+                            r->margin = crown::traceMargin(*ps, r->controls, r->margin.closed);
+                            marginChanged(app, *r);
+                            r->prepPoint = prepPoint;
+                        }
+                    }
+                }
+            }
+
+            // The point under the mouse (facing the camera).
+            hovered_ = -1;
+            if (s && editable && inView && dragging_ < 0) {
+                float best = 9.0f * sc;
+                for (std::size_t i = 0; i < r->controls.size(); ++i) {
+                    const std::uint32_t v = r->controls[i];
+                    if (glm::dot(transformVector(s->transform, glm::dvec3(s->mesh->normals[v])), fwd) > 0.25)
+                        continue;
+                    if (auto p = proj(transformPoint(s->transform, glm::dvec3(s->mesh->positions[v])))) {
+                        const float d = std::hypot(p->x - mouse.x, p->y - mouse.y);
+                        if (d <= best) {
+                            best = d;
+                            hovered_ = static_cast<int>(i);
+                        }
+                    }
+                }
+            }
+            if (hovered_ >= 0) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    dragging_ = hovered_;
+                    app.view3D(ViewId::Main3D).blockOrbit = true; // no orbit and no click while dragging
+                } else if (!io.WantTextInput && (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false))) {
+                    removeControl(app, *r, static_cast<std::size_t>(hovered_));
+                    hovered_ = -1;
+                }
+            } else if (editable && inView && dragging_ < 0 && mode_ == 2 && nearMarginLine(app, *r, proj, mouse)) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            }
+
             if (s && !r->controls.empty()) {
-                const glm::dvec3 fwd = app.view3D(ViewId::Main3D).camera.forward();
-                const float sc = ImGui::GetStyle().FontScaleDpi;
                 for (std::size_t i = 0; i < r->controls.size(); ++i) {
                     const std::uint32_t v = r->controls[i];
                     const glm::dvec3 n = transformVector(s->transform, glm::dvec3(s->mesh->normals[v]));
                     if (glm::dot(n, fwd) > 0.25)
                         continue; // facing away (behind the tooth)
                     if (auto p = proj(transformPoint(s->transform, glm::dvec3(s->mesh->positions[v])))) {
-                        dl->AddCircleFilled(*p, 5.5f * sc, IM_COL32(0, 0, 0, 150));
-                        dl->AddCircleFilled(*p, 4.5f * sc, i == 0 && !r->margin.closed ? IM_COL32(255, 255, 255, 255) : kControlColor);
+                        const bool active = static_cast<int>(i) == hovered_ || static_cast<int>(i) == dragging_;
+                        const float rad = (active ? 6.0f : 4.5f) * sc;
+                        dl->AddCircleFilled(*p, rad + 1.0f * sc, IM_COL32(0, 0, 0, 150));
+                        dl->AddCircleFilled(*p, rad, active ? IM_COL32(255, 255, 255, 255)
+                                                            : (i == 0 && !r->margin.closed ? IM_COL32(255, 255, 255, 255) : kControlColor));
                     }
                 }
             }
@@ -1292,13 +1364,15 @@ public:
                 drawHint(dl, proj, "Click on the top of the preparation");
             else if (mode_ == 1 && !r->margin.closed)
                 drawHint(dl, proj, r->controls.empty() ? "Click on the margin to start" : "Click the next margin point");
+            else if (mode_ == 2 && hovered_ >= 0 && dragging_ < 0)
+                drawHint(dl, proj, "Drag to move the point, Delete to remove it");
         };
     }
 
     void onViewEvent(DesignerApp& app, ViewId view, const ViewEvents& ev) override
     {
-        if (view != ViewId::Main3D || !ev.click || app.tasks().busy())
-            return;
+        if (view != ViewId::Main3D || !ev.click || app.tasks().busy() || dragging_ >= 0 || hovered_ >= 0)
+            return; // a click on a point selects it for dragging; it does not add one
         RestorationDesign* r = app.doc().active();
         if (!r || !r->supported() || r->isPontic())
             return;
@@ -1324,21 +1398,8 @@ public:
                 r->controls.push_back(v);
                 retrace(app, *r, false);
             }
-        } else if (!r->controls.empty()) {
-            const auto& pos = ps->mesh().positions;
-            std::size_t best = 0;
-            float bestD = 1e9f;
-            for (std::size_t i = 0; i < r->controls.size(); ++i) {
-                const float d = glm::length(pos[r->controls[i]] - pos[v]);
-                if (d < bestD) {
-                    bestD = d;
-                    best = i;
-                }
-            }
-            if (bestD < 4.0f) {
-                r->controls[best] = v;
-                retrace(app, *r, r->margin.closed);
-            }
+        } else if (r->controls.size() >= 2 && nearMarginLine(app, *r, ev.projector, ImGui::GetIO().MousePos)) {
+            insertControl(app, *r, v);
         }
     }
 
@@ -1360,8 +1421,107 @@ private:
         }
     }
 
+    // True when `screen` is within a few pixels of the drawn margin line.
+    bool nearMarginLine(DesignerApp& app, const RestorationDesign& r, const Projector& proj, const ImVec2& screen) const
+    {
+        ScanObject* s = scanById(app, r.prepScanId);
+        if (!s || r.margin.vertices.size() < 2)
+            return false;
+        const float limit = 10.0f * ImGui::GetStyle().FontScaleDpi;
+        const glm::dvec3 fwd = app.view3D(ViewId::Main3D).camera.forward();
+        std::optional<ImVec2> prev;
+        const std::size_t n = r.margin.vertices.size();
+        for (std::size_t i = 0; i <= n; ++i) {
+            if (i == n && !r.margin.closed)
+                break;
+            const std::uint32_t v = r.margin.vertices[i % n];
+            const auto p = proj(transformPoint(s->transform, glm::dvec3(s->mesh->positions[v])));
+            // Only the visible part of the margin: a click over a hidden part would land on the surface in front.
+            bool visible = p && glm::dot(transformVector(s->transform, glm::dvec3(s->mesh->normals[v])), fwd) <= 0.25;
+            if (visible && (i % 3 == 0 || !prev)) { // occlusion is checked on every third vertex
+                const auto ray = proj.rayAt(*p);
+                const auto hit = ray ? pickOnScan(app, r.prepScanId, *ray) : std::nullopt;
+                visible = hit && glm::length(*hit - s->mesh->positions[v]) < 0.3f;
+            }
+            if (!visible) {
+                prev.reset();
+                continue;
+            }
+            if (p && prev) {
+                const glm::vec2 a(prev->x, prev->y), b(p->x, p->y), m(screen.x, screen.y);
+                const glm::vec2 ab = b - a;
+                const float t = glm::dot(ab, ab) > 0.0f ? std::clamp(glm::dot(m - a, ab) / glm::dot(ab, ab), 0.0f, 1.0f) : 0.0f;
+                if (glm::length(m - (a + ab * t)) <= limit)
+                    return true;
+            }
+            prev = p;
+        }
+        return false;
+    }
+
+    // Adds a control point where it lengthens the control polygon least (between the two points
+    // it lies between along the margin).
+    void insertControl(DesignerApp& app, RestorationDesign& r, std::uint32_t v)
+    {
+        auto ps = prepScanFor(app, r.prepScanId);
+        if (!ps || std::find(r.controls.begin(), r.controls.end(), v) != r.controls.end())
+            return;
+        const auto& pos = ps->mesh().positions;
+        float toLine = std::numeric_limits<float>::max();
+        for (std::uint32_t m : r.margin.vertices)
+            toLine = std::min(toLine, glm::length(pos[m] - pos[v]));
+        if (toLine > 1.0f)
+            return; // the click landed on another part of the scan
+        const std::size_t n = r.controls.size();
+        const std::size_t segments = r.margin.closed ? n : n - 1;
+        std::size_t best = 0;
+        float bestCost = std::numeric_limits<float>::max();
+        for (std::size_t i = 0; i < segments; ++i) {
+            const glm::vec3 a = pos[r.controls[i]], b = pos[r.controls[(i + 1) % n]], p = pos[v];
+            const float cost = glm::length(p - a) + glm::length(b - p) - glm::length(b - a);
+            if (cost < bestCost) {
+                bestCost = cost;
+                best = i;
+            }
+        }
+        r.controls.insert(r.controls.begin() + static_cast<std::ptrdiff_t>(best + 1), v);
+        retrace(app, r, r.margin.closed);
+    }
+
+    void removeControl(DesignerApp& app, RestorationDesign& r, std::size_t index)
+    {
+        if (index >= r.controls.size())
+            return;
+        if (r.margin.closed && r.controls.size() <= 3) {
+            ui::toast(ui::ToastKind::Warning, "A closed margin needs at least three points.");
+            return;
+        }
+        r.controls.erase(r.controls.begin() + static_cast<std::ptrdiff_t>(index));
+        if (r.controls.empty()) {
+            r.margin = {};
+            r.prepPoint.reset();
+            marginChanged(app, r);
+            return;
+        }
+        retrace(app, r, r.margin.closed);
+    }
+
+    void finishDrag(DesignerApp& app, RestorationDesign& r)
+    {
+        dragging_ = -1;
+        app.view3D(ViewId::Main3D).blockOrbit = false;
+        if (r.marginClosed()) {
+            ensureDie(app, r);
+            if (!r.dieError.empty())
+                ui::toast(ui::ToastKind::Warning, r.dieError);
+        }
+    }
+
     int mode_ = 0;
     bool viewPending_ = false;
+    bool wasClosed_ = false;
+    int hovered_ = -1;  // control point under the mouse
+    int dragging_ = -1; // control point being dragged
 };
 
 // ---------------------------------------------------------------------------

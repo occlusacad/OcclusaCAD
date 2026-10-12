@@ -99,6 +99,22 @@ std::optional<ImVec2> Projector::operator()(const glm::dvec3& world) const
                   min.y + static_cast<float>((0.5 - ndc.y * 0.5) * (max.y - min.y)));
 }
 
+std::optional<Ray> Projector::rayAt(const ImVec2& screen) const
+{
+    const double w = max.x - min.x, h = max.y - min.y;
+    if (w <= 0.0 || h <= 0.0)
+        return std::nullopt;
+    const double x = (screen.x - min.x) / w * 2.0 - 1.0, y = 1.0 - (screen.y - min.y) / h * 2.0;
+    const glm::dmat4 inv = glm::inverse(viewProj);
+    glm::dvec4 a = inv * glm::dvec4(x, y, -1.0, 1.0), b = inv * glm::dvec4(x, y, 1.0, 1.0);
+    a /= a.w;
+    b /= b.w;
+    Ray r;
+    r.origin = glm::dvec3(a);
+    r.direction = glm::normalize(glm::dvec3(b - a));
+    return r;
+}
+
 ImU32 orientationColor(SliceOrientation o)
 {
     switch (o) {

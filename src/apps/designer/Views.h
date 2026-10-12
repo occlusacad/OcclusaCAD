@@ -22,6 +22,8 @@ struct Projector {
     ImVec2 max{0, 0};
 
     std::optional<ImVec2> operator()(const glm::dvec3& world) const;
+    // World-space ray through a screen point (e.g. the mouse while dragging a handle).
+    std::optional<Ray> rayAt(const ImVec2& screen) const;
     bool contains(const ImVec2& p) const { return p.x >= min.x && p.y >= min.y && p.x <= max.x && p.y <= max.y; }
 };
 
