@@ -23,7 +23,11 @@ enum class StepId {
     ScanBodyAlignment,
     MarginLine,
     InsertionAxis,
-    CrownDesign,
+    CrownBottom,
+    ToothPlacement,
+    Freeforming,
+    Connectors,
+    Merge,
     AbutmentDesign,
     Review,
 };

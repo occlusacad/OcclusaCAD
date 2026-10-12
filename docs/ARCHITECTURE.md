@@ -74,18 +74,32 @@ All geometry lives in `core/crown` (no GUI), in the coordinates of the scan cont
    * Manual drawing and editing use the same tracing.
 3. **Die** (`extractDie`): the scan is cut along the margin edges by a face flood fill from the preparation point. A margin that does not separate the preparation is detected (the fill escapes) and reported.
 4. **Insertion axis**: the default minimises the area-weighted squared undercut (faces facing away from the axis) within 25° of the margin normal. **Blockout** works in cylindrical coordinates around the axis: a die point is undercut when material higher up along the axis sticks out further. Points closer than 0.05 mm in height are ignored, so flat shoulders and scan noise are not blocked out.
-5. **Intaglio**: the die is offset along its normals by the cement gap. The gap ramps in over the distance to the margin, and an extra gap is added 1 mm further up. The result is then blocked out along the axis. The margin itself stays on a smoothed margin curve.
-6. **Outer shell** (`buildCrown`): a structured grid whose bottom ring **is** the margin. The anatomy comes from a tooth library (`ToothLibraryRegistry`; see [TOOTH_LIBRARIES.md](TOOTH_LIBRARIES.md)) as azimuthal (radius, height) profiles from the height of contour to the axis.
+5. **Crown bottom** (`makeCrownBase`, `makeCrownBottom`), after exocad's "Crown Bottoms" dialog:
+   * **Gap**: the die is offset by the cement gap along its normals, ramping in from the "no gap from margin" zone. Axial and radial spacing are added beyond it.
+   * **Block-out** along the axis, optionally with a draft angle. Nothing is blocked out in the untouchable zone along the margin.
+   * **Tool compensation**: every intaglio point is touched by a ball-shaped tool along its normal, with its centre on the preparation side. The intaglio is moved out to the boundary of all those balls, so it is overmilled next to preparation edges sharper than the tool. Margin vertices place no tool: the crown ends there, and their normals are unreliable. A bullnose tool uses a smaller effective radius.
+   * The margin itself stays on a smoothed margin curve, shifted by "below margin".
+   * `makeCrownBottom` builds the closed **crown bottom solid**: the intaglio, the border rings at the margin (horizontal, angled, vertical, in the plane of the outward direction and the axis), and the intaglio offset by the minimum thickness.
+6. **Tooth placement and shell**: `placedLibraryTooth` shows the library mesh placed by the parameters, free and not attached to the margin. Its parameters include rotation, tilt and occlusal shift. **Adapt to margin** switches to `buildCrown(..., shell = true)`: a zero-thickness shell whose bottom ring is the margin, closed over the die. That shell is what free-forming edits. Without `shell`, `buildCrown` builds the classic solid on the intaglio described below.
+7. **Merge** (`mergeCrown`): the crown is (shell ∪ crown bottom) − preparation space (`makeCavity`), using Manifold.
+   * The shell is first kept 0.02 mm outside the intaglio, so it never cuts through its own cap.
+   * Thickness and border therefore come from the crown bottom, whatever was sculpted.
+   * Bridges unite the merged units with their connectors (below).
+8. **Outer shell** (`buildCrown`): a structured grid whose bottom ring **is** the margin. The anatomy comes from a tooth library (`ToothLibraryRegistry`; see [TOOTH_LIBRARIES.md](TOOTH_LIBRARIES.md)) as azimuthal (radius, height) profiles from the height of contour to the axis.
    * Each margin vertex starts a column. Its profile runs from the margin to the height of contour along an emergence curve (a cubic Bézier), then follows the library profile.
    * The library profile is taken at the azimuth that lands on the column after anisotropic scaling to the crown's mesial/distal/buccal/lingual half-widths and height. Cusp scaling exaggerates or flattens the relief around the tooth's occlusal level.
    * **Minimum thickness**: walls are pushed out radially and the occlusal surface vertically. Both supports are dilated by the required thickness: the widest wall within that distance above, the highest point within it inwards. That way the shell also clears the edges of the die.
    * The radius may not grow again between the contour and the apex, so the pushes cannot fold the surface. Thickness ramps from the margin thickness over the first 1.2 mm.
    * Crown = reversed die faces + shell + centre fan, oriented by the die's margin edge. It is **closed and consistently oriented by construction**, and the tests check this.
-7. **Fitting and contacts**:
+9. **Fitting and contacts**:
    * Neighbour widths come from ray casts at the height of contour against the scan without the preparation. The height is a bisection on the clearance to the antagonist.
    * `adaptContacts` moves the shell along its normals. It pulls back where the signed distance is below target and extends facing areas towards proximal contacts. The correction is spread, then smoothed, and the final rounds only pull back.
    * The displacement field (one value per vertex) also stores free-form edits. It survives parameter changes and is saved with the design.
-8. **Orientation**: neighbouring crowns form two opposite lobes around the preparation, which gives the mesio-distal line; the arch centroid gives mesial and lingual. Both can be flipped in the UI.
+10. **Free-forming tools** (`Brush`): radial tool profiles.
+    * The round ball, the pointed knife and texture (value noise under a ball) are built in.
+    * Custom tools are a 2D cross-section plus a falloff, saved as `occlusacad.brush` JSON in the user's configuration folder.
+    * `applyBrushTool` adds or removes along the shell normals, smooths (Laplacian), or flattens onto the plane of the brushed area. The designer applies it continuously while the mouse is held.
+11. **Orientation**: neighbouring crowns form two opposite lobes around the preparation, which gives the mesio-distal line; the arch centroid gives mesial and lingual. Both can be flipped in the UI.
 
 ### Bridges (`core/crown/Bridge`)
 
@@ -186,7 +200,7 @@ The `RestorationDesign` state (margin vertex ids, axis, parameters, displacement
   * Ray casting, plane slicing, workflows, tooth numbering.
   * The SQLite repository: CRUD, concurrency conflicts, locks, two connections sharing one file, and file import.
 * `designer_alignment_e2e` (opt-in, `-DOCCLUSACAD_HEADLESS_TESTS=ON`, Linux + EGL) generates the phantom, runs the designer headless with simulated landmark picks, and fails if the error against ground truth exceeds 0.25 mm.
-* `designer_crown_e2e` (same option) opens the phantom crown case. It detects the margin from one click, sets the axis, designs and saves the crown. It fails if the margin deviates more than 0.3 mm from the analytic margin, or if the crown is not watertight or not saved to the case.
+* `designer_crown_e2e` (same option) opens the phantom crown case and runs the wizard: it detects the margin from one click, sets the axis, builds the crown bottom, auto-positions the library tooth, adapts it to the margin, adapts the contacts, merges, and saves the crown. It fails if the margin deviates more than 0.3 mm from the analytic margin, or if the crown is not watertight or not saved to the case.
 
   It then does the same for the bridge case 35-36-37: two margins, the common axis, the pontic, connectors, and the merged bridge saved as one STL.
 * `designer_abutment_e2e` (same option) opens the phantom abutment case, chooses the generic RP 4.1 connection and matches the scan body from a click. It fails if the implant platform is off by more than 0.05 mm (or the axis by more than 1°), or if the default abutment is not united with the interface and saved. It then repeats this with the library exported to a lab library folder by `occlusa_implantlib`.

@@ -255,10 +255,12 @@ CrownParameters ponticParameters(CrownParameters p)
 {
     p.coping = false;
     p.cementGap = 0.0;
-    p.extraGap = 0.0;
+    p.axialSpacing = p.radialSpacing = 0.0;
     p.distanceToMargin = 0.0;
     p.blockOutUndercuts = false;
-    p.marginThickness = std::max(p.marginThickness, 0.6); // rounded basal edge
+    p.anticipateMilling = false;
+    p.belowMargin = 0.0;
+    p.borderHorizontal = std::max(p.borderHorizontal, 0.6); // rounded basal edge
     return p;
 }
 

@@ -62,8 +62,8 @@ A library is a folder with one STL per tooth and a `library.json`:
 ## Using libraries in OcclusaCAD
 
 * **Where libraries are found**: the designer loads every library folder in `<data folder>/libraries/`, which the whole lab shares. It also loads the user's own folder, `libraries/` next to the configuration file.
-* **Importing**: **Import library…** on the Crown card copies a folder into the lab's libraries. Without a `library.json`, the folder is accepted when its STL files are named by FDI number and are in the tooth frame. Every tooth is checked before the library is offered.
-* **Choosing**: the library is chosen per restoration on the Crown card, and saved with the design. Its author and license are shown under the selector.
+* **Importing**: **Import library…** on the Tooth card copies a folder into the lab's libraries. Without a `library.json`, the folder is accepted when its STL files are named by FDI number and are in the tooth frame. Every tooth is checked before the library is offered.
+* **Choosing**: the library is chosen per restoration on the Tooth card of the tooth placement step, and saved with the design. Its author and license are shown under the selector.
 * **Licensing**: OcclusaCAD does not redistribute imported libraries. Make sure the lab may use a library it imports. Commercial CAD libraries are usually licensed to one installation, and research datasets such as Teeth3DS are non-commercial.
 
 ## How library teeth become crowns

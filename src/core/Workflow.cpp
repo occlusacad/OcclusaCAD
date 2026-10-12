@@ -48,9 +48,26 @@ const std::vector<StepInfo>& allSteps()
          "Check the insertion direction of the crown. Undercuts along the axis are shown in yellow to red and are blocked "
          "out on the inside of the crown. Optimise the axis or tilt it by hand.",
          true},
-        {StepId::CrownDesign, "crown_design", "Crown design", "Restoration", "Anatomy and contacts",
-         "The crown is designed automatically from the tooth library: fitted between the neighbours, to the antagonist and "
-         "with adapted contacts. Adjust its shape, contacts and thickness, or sculpt it with the free-form tools.",
+        {StepId::CrownBottom, "crown_bottom", "Crown bottom", "Restoration", "Cement gap, border, milling",
+         "Design the inside of the crown. Gap: the cement gap and the zone along the margin without it, plus extra axial and "
+         "radial spacing. Border: the crown edge at the margin (horizontal, angled, vertical). Advanced: undercut block-out and "
+         "milling tool compensation. Yellow: cement gap, green: no gap, red: blocked-out undercuts.",
+         true},
+        {StepId::ToothPlacement, "tooth_placement", "Tooth placement", "Restoration", "Position the library teeth",
+         "Position the library tooth: drag it to move, hold Ctrl to rotate, Shift to scale, Ctrl+Shift to scale in one direction. "
+         "Auto position fits it between the neighbours and to the antagonist. When it sits right, press Adapt to margin: the "
+         "tooth becomes a thin shell attached to the margin, ready for free-forming.",
+         true},
+        {StepId::Freeforming, "freeforming", "Free-forming", "Restoration", "Wax knife and adaptation",
+         "Shape the crown with the wax knife: hold the mouse button to add material (Shift: remove), or smooth (Shift: flatten). "
+         "Choose the tool (round ball, pointed knife, texture or your own). Adapt occlusion and contacts to the antagonist and "
+         "the neighbours, or cut all intersections.",
+         true},
+        {StepId::Connectors, "connectors", "Connectors", "Restoration", "Bridge connectors",
+         "Set the bridge connectors: cross-section area, height/width, embrasure, and the position and size of each one.", true},
+        {StepId::Merge, "merge", "Merge", "Restoration", "Unite crowns with their bottoms",
+         "Each crown is united with its crown bottom (cement gap, border, minimum thickness) and the preparation space is "
+         "removed; bridges are joined with their connectors. Check the results, then save.",
          true},
         {StepId::AbutmentDesign, "abutment_design", "Abutment design", "Restoration", "Emergence profile and core",
          "Shape the abutment on the library interface: drag the margin points (orange) and the emergence points halfway down "
@@ -89,7 +106,7 @@ const std::vector<WorkflowDef>& allWorkflows()
         {"custom_abutment", "Custom abutment", "Custom abutment and screw-retained restorations on implants.",
          {LoadData, ScanBodyAlignment, AbutmentDesign, Review}},
         {"crown_bridge", "Crown & bridge", "Tooth-borne crowns, copings, bridges, inlays and veneers.",
-         {LoadData, MarginLine, InsertionAxis, CrownDesign, Review}},
+         {LoadData, MarginLine, InsertionAxis, CrownBottom, ToothPlacement, Freeforming, Connectors, Merge, Review}},
     };
     return wfs;
 }

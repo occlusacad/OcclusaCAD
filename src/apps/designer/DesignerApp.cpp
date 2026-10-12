@@ -130,7 +130,11 @@ void DesignerApp::onStart()
         case StepId::Review: st = makeReviewStep(); break;
         case StepId::MarginLine: st = makeMarginLineStep(); break;
         case StepId::InsertionAxis: st = makeInsertionAxisStep(); break;
-        case StepId::CrownDesign: st = makeCrownDesignStep(); break;
+        case StepId::CrownBottom: st = makeCrownBottomStep(); break;
+        case StepId::ToothPlacement: st = makeToothPlacementStep(); break;
+        case StepId::Freeforming: st = makeFreeformingStep(); break;
+        case StepId::Connectors: st = makeConnectorsStep(); break;
+        case StepId::Merge: st = makeMergeStep(); break;
         case StepId::ScanBodyAlignment: st = makeScanBodyAlignmentStep(); break;
         case StepId::AbutmentDesign: st = makeAbutmentDesignStep(); break;
         default: st = makePlaceholderStep(s.id); break;
@@ -1280,13 +1284,11 @@ void DesignerApp::drawObjectsPanel()
     }
     bool anyCrown = false;
     for (const auto& r : doc_.restorations)
-        anyCrown |= r.crown != nullptr;
+        anyCrown |= r.crown != nullptr || r.libraryTooth != nullptr || r.merged != nullptr;
     if (anyCrown) {
         ImGui::Spacing();
         ui::subheading("Restorations");
         for (const auto& r : doc_.restorations) {
-            if (!r.crown)
-                continue;
             auto it = doc_.overlays.find(std::format("crown:{}", r.tooth));
             if (it == doc_.overlays.end())
                 continue;
@@ -1296,7 +1298,10 @@ void DesignerApp::drawObjectsPanel()
             ImGui::SameLine();
             ImGui::Text("%s %s", r.isPontic() ? "Pontic" : r.params.coping ? "Coping" : "Crown", toothText(r.tooth).c_str());
             ImGui::SameLine();
-            ui::mutedText("%.0f mm3", r.crown->volume);
+            if (r.merged && r.merged->ok)
+                ui::mutedText("%.0f mm3", r.merged->volume);
+            else
+                ui::mutedText(r.adapted ? "shell" : "library tooth");
             ImGui::PopID();
         }
     }

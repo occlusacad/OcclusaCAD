@@ -307,10 +307,14 @@ public:
                 continue;
             ImGui::Text("%s %s", r.isPontic() ? "Pontic" : r.params.coping ? "Coping" : "Crown", app.toothText(r.tooth).c_str());
             ImGui::SameLine();
-            if (r.crown)
-                ui::pill(std::format("{:.0f} mm3, min. {:.2f} mm", r.crown->volume, r.crown->minThickness).c_str(), r.crown->watertight ? pal.success : pal.danger);
-            else if (r.crownGenerated)
-                ui::pill("designed", pal.success);
+            if (r.merged && r.merged->ok)
+                ui::pill(std::format("{:.0f} mm3, min. {:.2f} mm", r.merged->volume, r.merged->minThickness).c_str(), r.merged->watertight ? pal.success : pal.danger);
+            else if (app.doc().bridgeOf(r.tooth) && r.adapted)
+                ui::pill("in bridge", pal.success);
+            else if (r.adapted)
+                ui::pill("not merged", pal.warning);
+            else if (r.placed)
+                ui::pill("not adapted", pal.warning);
             else
                 ui::pill("not designed", pal.warning);
         }

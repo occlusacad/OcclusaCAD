@@ -29,18 +29,22 @@ struct RestorationDesign {
     std::optional<glm::dvec3> insertionAxis;
     glm::dvec3 marginAxis{0.0};          // normal of the margin loop (reference for tilts)
 
-    // Crown
+    // Crown (exocad-style: crown bottom, tooth placement, adapt to margin, free-forming, merge)
     crown::CrownParameters params;
     std::optional<crown::CrownFrame> orientation; // estimated mesial / buccal directions
-    std::vector<float> displacement;     // sculpting / contact adaptation, one value per crown vertex
-    bool crownGenerated = false;
+    std::vector<float> displacement;     // free-forming / contact adaptation, one value per shell vertex
+    bool placed = false;                 // the library tooth has been positioned
+    bool adapted = false;                // attached to the margin: the shell exists and is free-formed
 
     // Derived data (rebuilt on demand, not saved).
     std::shared_ptr<const crown::DieRegion> die;
     std::string dieError;
     std::shared_ptr<const crown::CrownBase> base;
     std::shared_ptr<const crown::ContactScene> contacts;
-    std::shared_ptr<const crown::CrownMesh> crown;
+    std::shared_ptr<const crown::CrownMesh> crown;      // the adapted shell (zero thickness)
+    std::shared_ptr<const Mesh> bottom;                  // crown bottom solid
+    std::shared_ptr<const Mesh> libraryTooth;            // the free library tooth (tooth placement)
+    std::shared_ptr<const crown::CrownMerge> merged;     // the finished crown (merge step)
 
     bool supported() const;            // crowns, copings and pontics; other types are not designed yet
     bool isPontic() const { return type == "pontic"; }
@@ -58,6 +62,16 @@ struct RestorationDesign {
         base.reset();
         contacts.reset();
         crown.reset();
+        bottom.reset();
+        libraryTooth.reset();
+        merged.reset();
+    }
+    // The tooth shape or position changed (the base stays).
+    void invalidateShape()
+    {
+        crown.reset();
+        libraryTooth.reset();
+        merged.reset();
     }
 };
 
@@ -124,7 +138,8 @@ struct SavedRestoration {
     crown::CrownParameters params;
     std::optional<crown::CrownFrame> orientation;
     std::vector<float> displacement;
-    bool crownGenerated = false;
+    bool placed = false;
+    bool adapted = false;
     std::string crownFile;                // case-relative exported STL (if saved)
 };
 

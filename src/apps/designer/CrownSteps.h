@@ -11,10 +11,15 @@ namespace occlusa::designer {
 
 class DesignerApp;
 
-// Crown & bridge tools: margin line, insertion axis and crown design.
+// Crown & bridge tools (exocad-style): margin line, insertion axis, crown bottom, tooth placement,
+// free-forming, connectors and merge.
 std::unique_ptr<Step> makeMarginLineStep();
 std::unique_ptr<Step> makeInsertionAxisStep();
-std::unique_ptr<Step> makeCrownDesignStep();
+std::unique_ptr<Step> makeCrownBottomStep();
+std::unique_ptr<Step> makeToothPlacementStep();
+std::unique_ptr<Step> makeFreeformingStep();
+std::unique_ptr<Step> makeConnectorsStep();
+std::unique_ptr<Step> makeMergeStep();
 
 // Keeps the document's restorations in step with the case and the loaded scans
 // (creates entries for the case's crowns, restores saved designs once their scans are loaded).

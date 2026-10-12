@@ -33,8 +33,9 @@ void perpendicularBasis(const glm::dvec3& axis, glm::dvec3& u, glm::dvec3& v)
     v = glm::cross(axis, u);
 }
 
-Blockout computeBlockout(const Mesh& die, const glm::dvec3& axisIn, const glm::dvec3& center)
+Blockout computeBlockout(const Mesh& die, const glm::dvec3& axisIn, const glm::dvec3& center, double draftDeg)
 {
+    const double draft = std::tan(glm::radians(std::clamp(draftDeg, 0.0, 30.0)));
     const glm::dvec3 axis = glm::normalize(axisIn);
     glm::dvec3 u, v;
     perpendicularBasis(axis, u, v);
@@ -61,13 +62,14 @@ Blockout computeBlockout(const Mesh& die, const glm::dvec3& axisIn, const glm::d
     Blockout out;
     out.positions = die.positions;
     out.depth.assign(n, 0.0f);
-    std::vector<double> runMax(kBins, 0.0);
+    std::vector<double> runMax(kBins, -1e9);
     std::size_t added = 0; // vertices (in `order`) already folded into runMax
     for (std::size_t k = 0; k < n; ++k) {
         const std::size_t i = order[k];
         while (added < k && cyl[order[added]].h > cyl[i].h + kHeightTol) {
             const auto& c = cyl[order[added]];
-            runMax[static_cast<std::size_t>(c.bin)] = std::max(runMax[static_cast<std::size_t>(c.bin)], c.r);
+            // With a draft, a wall higher up needs less radius here: track r + draft * h.
+            runMax[static_cast<std::size_t>(c.bin)] = std::max(runMax[static_cast<std::size_t>(c.bin)], c.r + draft * c.h);
             ++added;
         }
         const auto& c = cyl[i];
@@ -75,7 +77,8 @@ Blockout computeBlockout(const Mesh& die, const glm::dvec3& axisIn, const glm::d
             continue;
         const int b = c.bin;
         const double above = std::max({runMax[static_cast<std::size_t>(b)], runMax[static_cast<std::size_t>((b + 1) % kBins)],
-                                       runMax[static_cast<std::size_t>((b + kBins - 1) % kBins)]});
+                                       runMax[static_cast<std::size_t>((b + kBins - 1) % kBins)]}) -
+                             draft * c.h;
         if (above > c.r) {
             out.depth[i] = static_cast<float>(above - c.r);
             out.positions[i] = glm::vec3(glm::dvec3(die.positions[i]) + c.radial * (above - c.r));

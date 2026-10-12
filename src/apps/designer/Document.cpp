@@ -127,11 +127,25 @@ json paramsToJson(const crown::CrownParameters& p)
             {"coping", p.coping},
             {"copingThickness", p.copingThickness},
             {"cementGap", p.cementGap},
-            {"extraGap", p.extraGap},
             {"distanceToMargin", p.distanceToMargin},
+            {"axialSpacing", p.axialSpacing},
+            {"radialSpacing", p.radialSpacing},
+            {"borderHorizontal", p.borderHorizontal},
+            {"borderAngled", p.borderAngled},
+            {"borderAngleDeg", p.borderAngleDeg},
+            {"borderVertical", p.borderVertical},
+            {"belowMargin", p.belowMargin},
             {"blockOutUndercuts", p.blockOutUndercuts},
+            {"blockoutAngleDeg", p.blockoutAngleDeg},
+            {"blockoutUntouchable", p.blockoutUntouchable},
+            {"anticipateMilling", p.anticipateMilling},
+            {"toolDiameter", p.toolDiameter},
+            {"bullnoseTool", p.bullnoseTool},
+            {"toolFlatPercent", p.toolFlatPercent},
+            {"tiltMesialDeg", p.tiltMesialDeg},
+            {"tiltBuccalDeg", p.tiltBuccalDeg},
+            {"shiftOcclusal", p.shiftOcclusal},
             {"minThickness", p.minThickness},
-            {"marginThickness", p.marginThickness},
             {"crownHeight", p.crownHeight},
             {"halfMesial", p.halfMesial},
             {"halfDistal", p.halfDistal},
@@ -157,11 +171,25 @@ crown::CrownParameters paramsFromJson(const json& j)
     p.coping = j.value("coping", p.coping);
     p.copingThickness = j.value("copingThickness", p.copingThickness);
     p.cementGap = j.value("cementGap", p.cementGap);
-    p.extraGap = j.value("extraGap", p.extraGap);
     p.distanceToMargin = j.value("distanceToMargin", p.distanceToMargin);
+    p.axialSpacing = j.value("axialSpacing", p.axialSpacing);
+    p.radialSpacing = j.value("radialSpacing", p.radialSpacing);
+    p.borderHorizontal = j.value("borderHorizontal", p.borderHorizontal);
+    p.borderAngled = j.value("borderAngled", p.borderAngled);
+    p.borderAngleDeg = j.value("borderAngleDeg", p.borderAngleDeg);
+    p.borderVertical = j.value("borderVertical", p.borderVertical);
+    p.belowMargin = j.value("belowMargin", p.belowMargin);
     p.blockOutUndercuts = j.value("blockOutUndercuts", p.blockOutUndercuts);
+    p.blockoutAngleDeg = j.value("blockoutAngleDeg", p.blockoutAngleDeg);
+    p.blockoutUntouchable = j.value("blockoutUntouchable", p.blockoutUntouchable);
+    p.anticipateMilling = j.value("anticipateMilling", p.anticipateMilling);
+    p.toolDiameter = j.value("toolDiameter", p.toolDiameter);
+    p.bullnoseTool = j.value("bullnoseTool", p.bullnoseTool);
+    p.toolFlatPercent = j.value("toolFlatPercent", p.toolFlatPercent);
+    p.tiltMesialDeg = j.value("tiltMesialDeg", p.tiltMesialDeg);
+    p.tiltBuccalDeg = j.value("tiltBuccalDeg", p.tiltBuccalDeg);
+    p.shiftOcclusal = j.value("shiftOcclusal", p.shiftOcclusal);
     p.minThickness = j.value("minThickness", p.minThickness);
-    p.marginThickness = j.value("marginThickness", p.marginThickness);
     p.crownHeight = j.value("crownHeight", p.crownHeight);
     p.halfMesial = j.value("halfMesial", p.halfMesial);
     p.halfDistal = j.value("halfDistal", p.halfDistal);
@@ -217,7 +245,8 @@ json restorationToJson(const SavedRestoration& r, dental::Numbering n)
     for (float d : r.displacement)
         disp.push_back(static_cast<std::int32_t>(std::lround(d * 1e4f)));
     o["displacement"] = disp;
-    o["crownGenerated"] = r.crownGenerated;
+    o["placed"] = r.placed;
+    o["adapted"] = r.adapted;
     if (!r.crownFile.empty())
         o["crownFile"] = r.crownFile;
     return o;
@@ -252,7 +281,8 @@ SavedRestoration restorationFromJson(const json& o, dental::Numbering n)
     if (o.contains("displacement"))
         for (std::int32_t d : o["displacement"].get<std::vector<std::int32_t>>())
             r.displacement.push_back(static_cast<float>(d) * 1e-4f);
-    r.crownGenerated = o.value("crownGenerated", false);
+    r.placed = o.value("placed", false);
+    r.adapted = o.value("adapted", false);
     r.crownFile = o.value("crownFile", "");
     return r;
 }

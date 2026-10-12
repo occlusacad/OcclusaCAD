@@ -15,7 +15,8 @@ struct Blockout {
     std::vector<float> depth;         // per vertex, mm
 };
 
-Blockout computeBlockout(const Mesh& die, const glm::dvec3& axis, const glm::dvec3& center);
+// `draftDeg`: the blocked-out surface widens downwards by this angle (0 = straight down the axis).
+Blockout computeBlockout(const Mesh& die, const glm::dvec3& axis, const glm::dvec3& center, double draftDeg = 0.0);
 
 struct UndercutReport {
     double undercutArea = 0.0; // mm^2 of die surface that needs blocking out (depth > 0.01 mm)

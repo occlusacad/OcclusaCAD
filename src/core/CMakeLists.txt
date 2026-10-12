@@ -20,6 +20,7 @@ add_library(occlusa_core STATIC
     Workflow.cpp
     crown/AnatomyGenerator.cpp
     crown/Bridge.cpp
+    crown/Brush.cpp
     crown/CrownBuilder.cpp
     crown/InsertionAxis.cpp
     crown/Margin.cpp

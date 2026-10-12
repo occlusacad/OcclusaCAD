@@ -1,7 +1,9 @@
 #include "core/crown/CrownBuilder.h"
 
+#include "core/MeshBoolean.h"
 #include "core/MeshTopology.h"
 #include "core/Parallel.h"
+#include "core/crown/Bridge.h"
 #include "core/crown/InsertionAxis.h"
 
 #include <algorithm>
@@ -10,6 +12,7 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <unordered_map>
 
 namespace occlusa::crown {
 
@@ -62,7 +65,16 @@ Axes resolveAxes(const CrownFrame& fr, const CrownParameters& p)
     ax.M = glm::normalize(m - glm::dot(m, ax.A) * ax.A);
     b = b - glm::dot(b, ax.A) * ax.A - glm::dot(b, ax.M) * ax.M;
     ax.B = glm::length(b) > 1e-9 ? glm::normalize(b) : glm::cross(ax.A, ax.M);
-    ax.F = fr.origin + ax.M * p.shiftMesial + ax.B * p.shiftBuccal;
+    ax.F = fr.origin + ax.M * p.shiftMesial + ax.B * p.shiftBuccal + ax.A * p.shiftOcclusal;
+    // Tilt of the tooth axis (tooth placement); mesial and buccal stay perpendicular to it.
+    if (p.tiltMesialDeg != 0.0 || p.tiltBuccalDeg != 0.0) {
+        const glm::dvec3 A = glm::normalize(ax.A + ax.M * std::tan(glm::radians(p.tiltMesialDeg)) + ax.B * std::tan(glm::radians(p.tiltBuccalDeg)));
+        ax.M = glm::normalize(ax.M - glm::dot(ax.M, A) * A);
+        ax.B = glm::cross(A, ax.M);
+        if (glm::dot(ax.B, b) < 0.0)
+            ax.B = -ax.B;
+        ax.A = A;
+    }
     return ax;
 }
 
@@ -154,21 +166,83 @@ void estimateToothOrientation(const Mesh& scan, const std::vector<glm::vec3>& ma
 }
 
 // ---------------------------------------------------------------------------
-// Base: intaglio surface
+// Base: intaglio surface (crown bottom)
 // ---------------------------------------------------------------------------
+
+namespace {
+
+// Milling tool compensation: the tool (a ball of radius R) cannot follow the preparation into
+// corners sharper than itself. Every intaglio point is touched by the tool along its normal (ball
+// centre R inside the preparation); the milled surface is the boundary of all those balls, so
+// next to sharp preparation edges the intaglio moves outwards (material removed from the crown).
+// Returns the outward offset per vertex. Points with `tool[i] == false` place no tool (the margin:
+// the crown ends there, so the tool never works around that edge, and the margin's normals are
+// unreliable).
+std::vector<float> toolCompensation(const Mesh& m, double R, const std::vector<char>& tool)
+{
+    const std::size_t n = m.vertexCount();
+    std::vector<float> out(n, 0.0f);
+    if (R <= 1e-3 || m.normals.size() != n)
+        return out;
+    std::vector<glm::dvec3> centre(n);
+    for (std::size_t i = 0; i < n; ++i)
+        centre[i] = glm::dvec3(m.positions[i]) - glm::dvec3(m.normals[i]) * R;
+    // Uniform grid over the ball centres (cell = R).
+    auto cellOf = [&](const glm::dvec3& p) { return glm::ivec3(glm::floor(p / R)); };
+    auto key = [](const glm::ivec3& c) {
+        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.x) & 0x1FFFFF) << 42) |
+               (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.y) & 0x1FFFFF) << 21) | (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.z) & 0x1FFFFF));
+    };
+    std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> grid;
+    for (std::size_t i = 0; i < n; ++i)
+        if (tool[i])
+            grid[key(cellOf(centre[i]))].push_back(static_cast<std::uint32_t>(i));
+    const double R2 = R * R;
+    parallelFor(n, [&](std::size_t i) {
+        const glm::dvec3 q(m.positions[i]);
+        const glm::dvec3 nq(m.normals[i]);
+        const glm::ivec3 c0 = cellOf(q);
+        double t = 0.0;
+        for (int dz = -2; dz <= 2; ++dz)
+            for (int dy = -2; dy <= 2; ++dy)
+                for (int dx = -2; dx <= 2; ++dx) {
+                    auto it = grid.find(key(c0 + glm::ivec3(dx, dy, dz)));
+                    if (it == grid.end())
+                        continue;
+                    for (std::uint32_t j : it->second) {
+                        // Only tool positions that cut into this point push it out (to where the
+                        // tool leaves it along the normal).
+                        const glm::dvec3 v = centre[j] - q;
+                        const double v2 = glm::dot(v, v);
+                        if (v2 >= R2)
+                            continue;
+                        const double proj = glm::dot(v, nq);
+                        t = std::max(t, proj + std::sqrt(R2 - (v2 - proj * proj)));
+                    }
+                }
+        out[i] = static_cast<float>(std::min(t, R));
+    });
+    return out;
+}
+
+} // namespace
 
 CrownBase makeCrownBase(DieRegion die, const CrownFrame& frame, const CrownParameters& p)
 {
     CrownBase base;
     base.frame = frame;
     base.frame.axis = glm::normalize(frame.axis);
+    const glm::dvec3 A = base.frame.axis;
     // The margin follows scan vertices and so carries the scan's staircase; the restoration uses a
-    // smoothed margin curve (the die boundary moves with it, so the crown stays closed).
+    // smoothed margin curve (the die boundary moves with it, so the crown stays closed). "Below
+    // margin" moves it along the insertion direction.
     {
         std::vector<glm::vec3> raw;
         for (std::uint32_t b : die.boundary)
             raw.push_back(die.mesh.positions[b]);
-        const auto smooth = smoothPolyline(raw, true, 4);
+        auto smooth = smoothPolyline(raw, true, 4);
+        for (auto& q : smooth)
+            q -= glm::vec3(A * p.belowMargin);
         for (std::size_t i = 0; i < die.boundary.size(); ++i)
             die.mesh.positions[die.boundary[i]] = smooth[i];
         base.margin = smooth;
@@ -185,25 +259,60 @@ CrownBase makeCrownBase(DieRegion die, const CrownFrame& frame, const CrownParam
         base.marginDistance[i] = static_cast<float>(best);
     });
 
+    // Gap: no cement gap along the margin ("From margin"), the cement gap above, plus the
+    // additional axial and radial spacing in the gap zone.
     Mesh intaglio = die.mesh;
     if (intaglio.normals.size() != intaglio.positions.size())
         intaglio.computeVertexNormals();
+    base.gap.assign(n, 0.0f);
+    const glm::dvec3 O = base.frame.origin;
     for (std::size_t i = 0; i < n; ++i) {
         const double d = base.marginDistance[i];
-        const double gap = p.cementGap * smoothstep(p.distanceToMargin * 0.4, p.distanceToMargin, d) +
-                           p.extraGap * smoothstep(p.distanceToMargin + 0.5, p.distanceToMargin + 1.5, d);
-        intaglio.positions[i] += intaglio.normals[i] * static_cast<float>(gap);
+        const double dm = std::max(p.distanceToMargin, 0.0);
+        const double wGap = dm > 0.0 ? smoothstep(dm * 0.6, dm, d) : 1.0;
+        const double wSpace = smoothstep(dm, dm + 0.5, d);
+        const glm::dvec3 q(intaglio.positions[i]);
+        glm::dvec3 radial = (q - O) - glm::dot(q - O, A) * A;
+        radial = glm::length(radial) > 1e-9 ? glm::normalize(radial) : glm::dvec3(0.0);
+        const glm::dvec3 offset = glm::dvec3(intaglio.normals[i]) * (p.cementGap * wGap) + (A * p.axialSpacing + radial * p.radialSpacing) * wSpace;
+        intaglio.positions[i] = glm::vec3(q + offset);
+        base.gap[i] = static_cast<float>(glm::length(offset));
     }
-    for (std::uint32_t b : die.boundary)
+    for (std::uint32_t b : die.boundary) {
         intaglio.positions[b] = die.mesh.positions[b]; // the margin itself stays exactly on the scan
-    if (p.blockOutUndercuts) {
-        Blockout bo = computeBlockout(intaglio, base.frame.axis, base.frame.origin);
-        intaglio.positions = std::move(bo.positions);
-        base.blockoutDepth = std::move(bo.depth);
+        base.gap[b] = 0.0f;
+    }
+    // Undercuts are blocked out along the insertion axis (a bullnose tool always needs it), except
+    // in the untouchable zone along the margin.
+    if (p.blockOutUndercuts || (p.anticipateMilling && p.bullnoseTool)) {
+        Blockout bo = computeBlockout(intaglio, A, base.frame.origin, p.blockoutAngleDeg);
+        base.blockoutDepth.assign(n, 0.0f);
+        for (std::size_t i = 0; i < n; ++i) {
+            const double u = p.blockoutUntouchable > 0.0 ? smoothstep(p.blockoutUntouchable * 0.7, p.blockoutUntouchable, base.marginDistance[i]) : 1.0;
+            intaglio.positions[i] = glm::mix(intaglio.positions[i], bo.positions[i], static_cast<float>(u));
+            base.blockoutDepth[i] = static_cast<float>(bo.depth[i] * u);
+        }
         for (std::uint32_t b : die.boundary)
             intaglio.positions[b] = die.mesh.positions[b];
     } else {
         base.blockoutDepth.assign(n, 0.0f);
+    }
+    // Milling tool compensation (round bur, or a bullnose tool with a smaller corner radius).
+    base.toolCompensation.assign(n, 0.0f);
+    if (p.anticipateMilling && p.toolDiameter > 0.0) {
+        intaglio.computeVertexNormals();
+        const double flat = p.bullnoseTool ? std::clamp(p.toolFlatPercent, 0.0, 100.0) / 100.0 : 0.0;
+        const double R = 0.5 * p.toolDiameter * (1.0 - 0.7 * flat);
+        std::vector<char> tool(n);
+        for (std::size_t i = 0; i < n; ++i)
+            tool[i] = base.marginDistance[i] > 0.4f;
+        const auto comp = toolCompensation(intaglio, R, tool);
+        for (std::size_t i = 0; i < n; ++i) {
+            const double w = smoothstep(0.0, 0.3, base.marginDistance[i]);
+            const float c = static_cast<float>(comp[i] * w);
+            intaglio.positions[i] += intaglio.normals[i] * c;
+            base.toolCompensation[i] = c;
+        }
     }
     intaglio.computeVertexNormals();
     auto shared = std::make_shared<const Mesh>(std::move(intaglio));
@@ -295,13 +404,16 @@ ContactScene makeContactScene(const Mesh& prepScan, const CrownBase& base, const
 // Crown generation
 // ---------------------------------------------------------------------------
 
-CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<const float> displacement)
+CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<const float> displacement, bool shell)
 {
     CrownMesh out;
     const std::shared_ptr<const ToothShape> shape = toothShape(p.library, p.kind, p.upper);
     const Axes ax = resolveAxes(base.frame, p);
     const HalfWidths hw = halfWidths(*shape, p);
-    const Mesh& intaglio = *base.intaglio;
+    // The shell is closed over the die itself (its cap is removed again when merging); the classic
+    // solid sits on the intaglio.
+    const Mesh& intaglio = shell ? base.die.mesh : *base.intaglio;
+    const bool support_ = !shell || p.coping; // a coping keeps its thickness over the intaglio
     const std::size_t dieCount = intaglio.vertexCount();
     const std::size_t L = base.margin.size();
     if (L < 3)
@@ -411,7 +523,7 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
             prof[static_cast<std::size_t>(k)] = glm::dvec2(q.x * radial, relief(q, contourLib) * sz);
         }
         // Keep the height of contour outside and above the margin (fading out towards the apex).
-        const double needR = rm + 0.4 + p.marginThickness;
+        const double needR = rm + 0.4 + p.borderHorizontal;
         const double needH = hmI + 0.8;
         const double dR = std::max(0.0, needR - prof[0].x), dH = std::max(0.0, needH - prof[0].y);
         for (int k = 0; k < K; ++k) {
@@ -428,7 +540,7 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
             bool cap = false;
             if (ring <= kSideRings1) {
                 const double t = std::pow(static_cast<double>(ring) / kSideRings1, 1.3);
-                const glm::dvec2 q = bezier({rm, hmI}, {rm + p.marginThickness + 0.35 * (Rc - rm), hmI + 0.35 * (Hc - hmI)},
+                const glm::dvec2 q = bezier({rm, hmI}, {rm + p.borderHorizontal + 0.35 * (Rc - rm), hmI + 0.35 * (Hc - hmI)},
                                             {Rc, hmI + 0.7 * (Hc - hmI)}, {Rc, Hc}, t);
                 r = q.x;
                 h = q.y;
@@ -444,12 +556,13 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
                 h = q.y;
                 cap = r < 0.85 * Rc; // occlusal surface: supported vertically only
             }
-            const double tau = cap ? p.minThickness : glm::mix(p.marginThickness, p.minThickness, smoothstep(0.0, 1.2, h - hmI));
-            double rMin, hMin;
-            support(d, h, r, p.coping ? p.copingThickness : tau, rMin, hMin);
+            const double tau = cap ? p.minThickness : glm::mix(p.borderHorizontal, p.minThickness, smoothstep(0.0, 1.2, h - hmI));
+            double rMin = -1e9, hMin = -1e9;
+            if (support_)
+                support(d, h, r, p.coping ? p.copingThickness : tau, rMin, hMin);
             if (p.coping) {
                 // Uniform shell over the intaglio.
-                const double thick = std::max(p.copingThickness * smoothstep(0.0, 1.0, h - hmI), p.marginThickness);
+                const double thick = std::max(p.copingThickness * smoothstep(0.0, 1.0, h - hmI), p.borderHorizontal);
                 if (!cap && rMin > -1e8)
                     r = rMin + thick;
                 if (hMin > -1e8 && (cap || h < hMin + thick))
@@ -458,10 +571,11 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
                     copingContourR = r;
             } else {
                 // Side walls are supported radially, the occlusal cap only vertically (pushing cap
-                // rings outwards would fold them over each other).
-                if (!cap && rMin > -1e8 && r < rMin + tau)
+                // rings outwards would fold them over each other). The shell keeps the library
+                // shape: the thickness comes from the crown bottom when merging.
+                if (support_ && !cap && rMin > -1e8 && r < rMin + tau)
                     r = rMin + tau;
-                if (hMin > -1e8 && h < hMin + tau)
+                if (support_ && hMin > -1e8 && h < hMin + tau)
                     h = hMin + tau;
             }
             const std::uint32_t vi = index(ring, i);
@@ -480,9 +594,10 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
         const glm::dvec2 apex = shape->at(0.0, K - 1);
         double h = relief(apex, 1e-9 + shape->at(0.0, 0).x) * sz;
         const double tau = p.coping ? p.copingThickness : p.minThickness;
-        double rMin, hMin;
-        support(ax.M, h, 0.0, tau, rMin, hMin);
-        if (hMin > -1e8 && (p.coping || h < hMin + tau))
+        double rMin = -1e9, hMin = -1e9;
+        if (support_)
+            support(ax.M, h, 0.0, tau, rMin, hMin);
+        if (support_ && hMin > -1e8 && (p.coping || h < hMin + tau))
             h = hMin + tau;
         pos[centre] = glm::vec3(ax.F + ax.A * h);
         weight[centre] = 1.0f;
@@ -539,7 +654,7 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
     // vertex out can change which part of the intaglio is closest).
     double minThick = 1e9;
     std::vector<int> thickened(m.vertexCount(), 0);
-    for (int pass = 0; pass < 4; ++pass) {
+    for (int pass = 0; pass < (support_ ? 4 : 0); ++pass) {
         std::atomic<int> moved{0};
         parallelFor(m.vertexCount() - out.outerBegin, [&](std::size_t k) {
             const std::size_t v = out.outerBegin + k;
@@ -581,6 +696,179 @@ CrownMesh buildCrown(const CrownBase& base, const CrownParameters& p, std::span<
     out.minThickness = minThick > 1e8 ? 0.0 : minThick;
     out.volume = signedVolume(m);
     out.watertight = isClosedManifold(m);
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Crown bottom solid, free library tooth, merge
+// ---------------------------------------------------------------------------
+
+Mesh makeCrownBottom(const CrownBase& base, const CrownParameters& p)
+{
+    const Mesh& I = *base.intaglio;
+    const auto& bnd = base.die.boundary;
+    const std::size_t n = I.vertexCount(), L = bnd.size();
+    Mesh m;
+    if (L < 3 || n == 0)
+        return m;
+    const glm::dvec3 A = glm::normalize(base.frame.axis);
+    const glm::dvec3 c = centroid(base.margin);
+
+    // Border profile in the (outwards, axis) plane at every margin point: horizontal, angled, vertical.
+    std::vector<glm::dvec2> profile;
+    const double H = std::max(p.borderHorizontal, 0.01);
+    profile.emplace_back(H, 0.0);
+    const double ang = glm::radians(std::clamp(p.borderAngleDeg, 0.0, 90.0));
+    if (p.borderAngled > 0.005)
+        profile.push_back(profile.back() + glm::dvec2(std::cos(ang), std::sin(ang)) * p.borderAngled);
+    if (p.borderVertical > 0.005)
+        profile.push_back(profile.back() + glm::dvec2(0.0, p.borderVertical));
+    std::vector<glm::dvec3> outward(L);
+    for (std::size_t i = 0; i < L; ++i) {
+        const glm::dvec3 t = glm::dvec3(base.margin[(i + 1) % L]) - glm::dvec3(base.margin[(i + L - 1) % L]);
+        glm::dvec3 h = glm::cross(t, A);
+        h -= A * glm::dot(h, A);
+        h = glm::length(h) > 1e-9 ? glm::normalize(h) : glm::dvec3(1, 0, 0);
+        if (glm::dot(h, glm::dvec3(base.margin[i]) - c) < 0.0)
+            h = -h;
+        outward[i] = h;
+    }
+
+    // Vertices: [intaglio] [outer: intaglio offset by the minimum thickness] [border rings].
+    // The outer surface's boundary is the last border ring.
+    const auto outer0 = static_cast<std::uint32_t>(n);
+    m.positions.reserve(2 * n + L * profile.size());
+    m.positions = I.positions;
+    const double t = std::max(p.minThickness, 0.05);
+    for (std::size_t i = 0; i < n; ++i)
+        m.positions.push_back(I.positions[i] + I.normals[i] * static_cast<float>(t));
+    auto borderPoint = [&](std::size_t i, const glm::dvec2& q) {
+        return glm::vec3(glm::dvec3(base.margin[i]) + outward[i] * q.x + A * q.y);
+    };
+    for (std::size_t i = 0; i < L; ++i)
+        m.positions[outer0 + bnd[i]] = borderPoint(i, profile.back());
+    std::vector<std::uint32_t> ringStart;
+    for (std::size_t k = 0; k + 1 < profile.size(); ++k) {
+        ringStart.push_back(static_cast<std::uint32_t>(m.positions.size()));
+        for (std::size_t i = 0; i < L; ++i)
+            m.positions.push_back(borderPoint(i, profile[k]));
+    }
+
+    // Faces: outer with the die's winding, intaglio reversed, strips between the rings.
+    bool forward = false; // does the die use the margin edge b0 -> b1?
+    for (std::size_t f = 0; f + 2 < I.indices.size() && !forward; f += 3)
+        for (int e = 0; e < 3; ++e)
+            if (I.indices[f + static_cast<std::size_t>(e)] == bnd[0] && I.indices[f + static_cast<std::size_t>((e + 1) % 3)] == bnd[1])
+                forward = true;
+    for (std::size_t f = 0; f + 2 < I.indices.size(); f += 3) {
+        m.indices.insert(m.indices.end(), {outer0 + I.indices[f], outer0 + I.indices[f + 1], outer0 + I.indices[f + 2]});
+        m.indices.insert(m.indices.end(), {I.indices[f], I.indices[f + 2], I.indices[f + 1]});
+    }
+    std::vector<std::vector<std::uint32_t>> rings;
+    rings.push_back(std::vector<std::uint32_t>(bnd.begin(), bnd.end()));
+    for (std::uint32_t r0 : ringStart) {
+        std::vector<std::uint32_t> r(L);
+        for (std::size_t i = 0; i < L; ++i)
+            r[i] = r0 + static_cast<std::uint32_t>(i);
+        rings.push_back(std::move(r));
+    }
+    {
+        std::vector<std::uint32_t> r(L);
+        for (std::size_t i = 0; i < L; ++i)
+            r[i] = outer0 + bnd[i];
+        rings.push_back(std::move(r));
+    }
+    for (std::size_t k = 0; k + 1 < rings.size(); ++k)
+        for (std::size_t i = 0; i < L; ++i) {
+            const std::size_t j = (i + 1) % L;
+            const std::uint32_t a = rings[k][i], b = rings[k][j], cc = rings[k + 1][j], d = rings[k + 1][i];
+            if (forward)
+                m.indices.insert(m.indices.end(), {a, b, cc, a, cc, d});
+            else
+                m.indices.insert(m.indices.end(), {a, cc, b, a, d, cc});
+        }
+    if (signedVolume(m) < 0.0)
+        for (std::size_t f = 0; f + 2 < m.indices.size(); f += 3)
+            std::swap(m.indices[f + 1], m.indices[f + 2]);
+    m.computeVertexNormals();
+    return m;
+}
+
+Mesh placedLibraryTooth(const CrownBase& base, const CrownParameters& p)
+{
+    Mesh out;
+    const std::string lib = p.library.empty() ? ToothLibraryRegistry::kDefaultLibrary : p.library;
+    const auto mesh = ToothLibraryRegistry::instance().toothMesh(lib, p.kind, p.upper);
+    const auto shape = toothShape(p.library, p.kind, p.upper);
+    if (!mesh || !shape)
+        return out;
+    const Axes ax = resolveAxes(base.frame, p);
+    const HalfWidths hw = halfWidths(*shape, p);
+    const double sz = crownHeightOf(*shape, p) / std::max(shape->height, 1e-6);
+    const double cusp = p.coping ? 1.0 : p.cuspScale;
+    double zMin = 1e30;
+    for (const auto& q : mesh->positions)
+        zMin = std::min(zMin, static_cast<double>(q.z));
+    out = *mesh;
+    for (auto& q : out.positions) {
+        const double x = q.x, y = q.y, z = q.z - zMin;
+        // Cusp height: the same relief scaling as the adapted crown.
+        const double th = std::atan2(y, x);
+        const double contour = shape->at(th, 0).x;
+        const double w = 1.0 - smoothstep(0.6 * contour, 0.9 * contour, std::hypot(x, y));
+        const double zr = z + w * (cusp - 1.0) * (z - shape->occlusalLevel);
+        const double xs = x * (x >= 0.0 ? hw.mesial / shape->halfMesial : hw.distal / shape->halfDistal);
+        const double ys = y * (y >= 0.0 ? hw.buccal / shape->halfBuccal : hw.lingual / shape->halfLingual);
+        q = glm::vec3(ax.F + ax.M * xs + ax.B * ys + ax.A * (zr * sz));
+    }
+    // Mirroring (flips) or a lingual/mesial axis swap can turn the triangles inside out.
+    if (signedVolume(out) < 0.0)
+        for (std::size_t f = 0; f + 2 < out.indices.size(); f += 3)
+            std::swap(out.indices[f + 1], out.indices[f + 2]);
+    out.colors.clear();
+    out.computeVertexNormals();
+    return out;
+}
+
+CrownMerge mergeCrown(const CrownBase& base, const CrownMesh& shellIn, const Mesh& bottom)
+{
+    CrownMerge out;
+    // The shell keeps clear of the intaglio, so it does not cut through its own cap over the die
+    // (a library tooth thinner than the preparation would); the crown bottom adds the thickness.
+    Mesh shell = shellIn.mesh;
+    for (std::size_t v = shellIn.outerBegin; v < shell.vertexCount(); ++v)
+        if (auto cp = base.intaglioBvh.closestPoint(shell.positions[v], 3.0f); cp && cp->signedDistance < 0.02f &&
+                                                                                 shellIn.editWeight.size() == shell.vertexCount() && shellIn.editWeight[v] > 0.0f)
+            shell.positions[v] = cp->point + cp->normal * 0.02f;
+    BooleanResult r;
+    if (bottom.empty()) {
+        r.mesh = shell; // pontic: the shell over the ridge base is the unit
+    } else {
+        const Mesh cavity = makeCavity(base);
+        r = meshBoolean({&shell, &bottom}, {&cavity});
+    }
+    if (!r.ok()) {
+        out.error = r.error;
+        return out;
+    }
+    out.mesh = std::move(r.mesh);
+    out.ok = true;
+    out.watertight = isClosedManifold(out.mesh);
+    out.volume = signedVolume(out.mesh);
+    // Thickness over the intaglio, away from the border.
+    double minT = 1e9;
+    const std::size_t L = base.margin.size();
+    for (const auto& q : out.mesh.positions) {
+        auto cp = base.intaglioBvh.closestPoint(q, 5.0f);
+        if (!cp || cp->signedDistance < 0.05f)
+            continue; // on the intaglio
+        double dm = 1e9;
+        for (std::size_t k = 0; k < L; ++k)
+            dm = std::min(dm, pointSegmentDistance(glm::dvec3(q), glm::dvec3(base.margin[k]), glm::dvec3(base.margin[(k + 1) % L])));
+        if (dm > 1.5)
+            minT = std::min(minT, static_cast<double>(cp->signedDistance));
+    }
+    out.minThickness = minT > 1e8 ? 0.0 : minT;
     return out;
 }
 
@@ -628,7 +916,7 @@ void fitProximal(const CrownBase& base, const ContactScene& contacts, CrownParam
     p.halfLingual = std::max(shape->halfLingual * std::sqrt(ratio), extent[3] + 0.6);
 }
 
-bool fitOcclusalHeight(const CrownBase& base, const ContactScene& contacts, CrownParameters& p, std::span<const float> displacement)
+bool fitOcclusalHeight(const CrownBase& base, const ContactScene& contacts, CrownParameters& p, std::span<const float> displacement, bool shell)
 {
     if (!contacts.antagonist)
         return false;
@@ -639,7 +927,7 @@ bool fitOcclusalHeight(const CrownBase& base, const ContactScene& contacts, Crow
     auto clearance = [&](double H) {
         CrownParameters q = p;
         q.crownHeight = H;
-        const CrownMesh c = buildCrown(base, q, displacement);
+        const CrownMesh c = buildCrown(base, q, displacement, shell);
         double best = 5.0;
         for (std::size_t v = c.outerBegin; v < c.mesh.vertexCount(); ++v) {
             if (c.editWeight[v] < 0.999f)
@@ -672,9 +960,9 @@ namespace {
 
 // Laplacian smoothing of the displacement field over the outer shell (removes ripples left by
 // per-vertex contact corrections).
-void smoothDisplacement(const CrownBase& base, const CrownParameters& p, std::vector<float>& displacement, int iterations)
+void smoothDisplacement(const CrownBase& base, const CrownParameters& p, std::vector<float>& displacement, int iterations, bool shell)
 {
-    const CrownMesh c = buildCrown(base, p, displacement);
+    const CrownMesh c = buildCrown(base, p, displacement, shell);
     if (displacement.size() != c.mesh.vertexCount())
         return;
     const MeshAdjacency adj(c.mesh);
@@ -698,15 +986,15 @@ void smoothDisplacement(const CrownBase& base, const CrownParameters& p, std::ve
 } // namespace
 
 void adaptContacts(const CrownBase& base, const CrownParameters& p, const ContactScene& contacts, std::vector<float>& displacement,
-                   bool proximal, bool occlusal, double reach)
+                   bool proximal, bool occlusal, double reach, bool shell)
 {
     constexpr int kRounds = 10;
     for (int round = 0; round < kRounds; ++round) {
         // The last rounds only pull back, so spreading an extension never leaves an overlap.
         const bool allowExtend = round < kRounds - 4;
         if (round == kRounds - 4)
-            smoothDisplacement(base, p, displacement, 6);
-        const CrownMesh c = buildCrown(base, p, displacement);
+            smoothDisplacement(base, p, displacement, 6, shell);
+        const CrownMesh c = buildCrown(base, p, displacement, shell);
         const std::size_t nv = c.mesh.vertexCount();
         if (displacement.size() != nv)
             displacement.assign(nv, 0.0f);
@@ -816,6 +1104,7 @@ void applyBrush(const CrownMesh& crown, std::vector<float>& displacement, const 
         switch (mode) {
         case BrushMode::Add: delta[v] = strength * w; break;
         case BrushMode::Remove: delta[v] = -strength * w; break;
+        case BrushMode::Flatten: break; // see applyBrushTool
         case BrushMode::Smooth: {
             glm::vec3 avg(0.0f);
             int cnt = 0;

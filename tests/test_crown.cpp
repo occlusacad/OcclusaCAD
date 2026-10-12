@@ -3,6 +3,7 @@
 #include "core/IsoSurface.h"
 #include "core/MeshBvh.h"
 #include "core/MeshTopology.h"
+#include "core/crown/Brush.h"
 #include "core/crown/CrownBuilder.h"
 #include "core/crown/InsertionAxis.h"
 #include "core/crown/Margin.h"
@@ -10,6 +11,7 @@
 #include <doctest.h>
 
 #include <cmath>
+#include <glm/gtx/string_cast.hpp>
 #include <memory>
 #include <random>
 
@@ -269,12 +271,14 @@ TEST_CASE("Crown design: fit, contacts, thickness and watertightness")
 
     CrownParameters params;
     params.kind = ToothKind::FirstMolar;
+    params.axialSpacing = params.radialSpacing = 0.0;
+    params.anticipateMilling = false;
     const CrownBase base = makeCrownBase(*die, frame, params);
     REQUIRE(base.intaglio);
-    // Cement gap: away from the margin the intaglio is offset by cement + extra gap.
+    // Cement gap: away from the margin the intaglio is offset by the cement gap.
     for (std::size_t i = 0; i < base.die.mesh.vertexCount(); ++i)
         if (base.marginDistance[i] > 3.0f && base.blockoutDepth[i] < 1e-4f)
-            CHECK(glm::length(base.intaglio->positions[i] - base.die.mesh.positions[i]) == doctest::Approx(0.07).epsilon(0.05));
+            CHECK(glm::length(base.intaglio->positions[i] - base.die.mesh.positions[i]) == doctest::Approx(params.cementGap).epsilon(0.05));
     for (std::uint32_t b : base.die.boundary)
         CHECK(base.intaglio->positions[b] == base.die.mesh.positions[b]);
 
@@ -329,6 +333,99 @@ TEST_CASE("Crown design: fit, contacts, thickness and watertightness")
 }
 
 
+
+TEST_CASE("Crown bottom, free library tooth, adapted shell and merge (exocad-style workflow)")
+{
+    const Fixture& f = fixture();
+    const PrepScan prep(f.scan);
+    const glm::vec3 click(transformPoint(f.toScan, glm::dvec3(0.0, 0.0, 4.5)));
+    const auto det = detectMargin(prep, click);
+    REQUIRE(det);
+    auto die = extractDie(prep, det->line, click);
+    REQUIRE(die);
+    CrownFrame frame;
+    frame.origin = centroid(det->line.points(*f.scan));
+    frame.axis = optimizeInsertionAxis(die->mesh, det->occlusalDirection);
+    estimateToothOrientation(*f.scan, det->line.points(*f.scan), frame);
+
+    CrownParameters params;
+    params.kind = ToothKind::FirstMolar;
+    // Gap zones: nothing within "from margin", the cement gap plus spacing well above it.
+    CrownBase base = makeCrownBase(*die, frame, params);
+    float nearMax = 0.0f, farMin = 1e9f;
+    for (std::size_t i = 0; i < base.gap.size(); ++i) {
+        if (base.marginDistance[i] < 0.5f * params.distanceToMargin)
+            nearMax = std::max(nearMax, base.gap[i]);
+        if (base.marginDistance[i] > params.distanceToMargin + 1.0f)
+            farMin = std::min(farMin, base.gap[i]);
+    }
+    CHECK(nearMax < 0.005f);
+    CHECK(farMin > static_cast<float>(params.cementGap) * 0.95f);
+    // Tool compensation: the occlusal edge of the preparation is rounded with 0.6 mm, so a 1.2 mm
+    // tool follows it, while a 2 mm tool overmills next to it (and never along the margin).
+    auto maxComp = [](const CrownBase& b) {
+        float m = 0.0f;
+        for (float c : b.toolCompensation)
+            m = std::max(m, c);
+        return m;
+    };
+    CHECK(maxComp(base) < 0.05f);
+    CrownParameters bigTool = params;
+    bigTool.toolDiameter = 2.0;
+    const CrownBase bigBase = makeCrownBase(*die, frame, bigTool);
+    MESSAGE("tool compensation with a 2 mm tool up to " << maxComp(bigBase) << " mm");
+    CHECK(maxComp(bigBase) > 0.05f);
+    CHECK(maxComp(bigBase) <= 1.0f + 1e-4f);
+    for (std::uint32_t bv : bigBase.die.boundary)
+        CHECK(bigBase.toolCompensation[bv] == 0.0f);
+
+    // The crown bottom is a closed solid with the border at the margin.
+    const Mesh bottom = makeCrownBottom(base, params);
+    CHECK(isClosedManifold(bottom));
+    CHECK(signedVolume(bottom) > 5.0);
+
+    // The library tooth is placed but not attached: moving it moves every vertex.
+    const Mesh tooth = placedLibraryTooth(base, params);
+    REQUIRE(!tooth.empty());
+    CrownParameters moved = params;
+    moved.shiftOcclusal = 1.0;
+    const Mesh tooth2 = placedLibraryTooth(base, moved);
+    CHECK(glm::length(glm::dvec3(tooth2.positions[0] - tooth.positions[0]) - frame.axis * 1.0) < 1e-3);
+
+    // Adapt to margin: the zero-thickness shell starts exactly at the margin and is closed over the die.
+    const CrownMesh shell = buildCrown(base, params, {}, true);
+    CHECK(shell.watertight);
+    for (std::uint32_t b : base.die.boundary)
+        CHECK(shell.mesh.positions[b] == base.die.mesh.positions[b]);
+
+    // Merge: shell united with the bottom, minus the preparation space.
+    const CrownMerge merged = mergeCrown(base, shell, bottom);
+    REQUIRE(merged.ok);
+    CHECK(merged.watertight);
+    MESSAGE("merged crown " << merged.volume << " mm3, min thickness " << merged.minThickness);
+    CHECK(merged.volume > 100.0);
+    CHECK(merged.minThickness > params.minThickness * 0.85);
+    // Nothing of the crown is left inside the preparation space.
+    std::size_t inside = 0;
+    for (const auto& q : merged.mesh.positions) {
+        double dm = 1e9;
+        for (const auto& m : base.margin)
+            dm = std::min(dm, glm::length(glm::dvec3(q) - glm::dvec3(m)));
+        if (dm < 0.6)
+            continue; // the border at the margin (signed distances are unreliable at the intaglio's edge)
+        if (auto cp = base.intaglioBvh.closestPoint(q, 1.0f); cp && cp->signedDistance < -0.03f)
+            ++inside;
+    }
+    CHECK(inside == 0);
+
+    // A tooth sunk into the preparation is still made thick enough by the crown bottom.
+    CrownParameters sunk = params;
+    sunk.shiftOcclusal = -2.5;
+    const CrownMerge thin = mergeCrown(base, buildCrown(base, sunk, {}, true), bottom);
+    REQUIRE(thin.ok);
+    CHECK(thin.watertight);
+    CHECK(thin.minThickness > params.minThickness * 0.85);
+}
 
 TEST_CASE("Crown occlusal surface does not fold, even when it sits low over the preparation")
 {
@@ -413,4 +510,73 @@ TEST_CASE("Every built-in library tooth gives a closed crown without folds")
                 }
                 CHECK(flipped == 0);
             }
+}
+
+TEST_CASE("Free-forming tools: profiles, custom tools round trip, add / remove / flatten")
+{
+    const auto tools = builtinBrushTools();
+    REQUIRE(tools.size() == 3);
+    const BrushTool& ball = tools[0];
+    const BrushTool& knife = tools[1];
+    // The knife is concentrated at its tip, the ball is broad.
+    CHECK(knife.weight(0.0, {}) == doctest::Approx(1.0));
+    CHECK(ball.weight(0.5, {}) > knife.weight(0.5, {}) * 3.0);
+    CHECK(ball.weight(1.0, {}) == 0.0);
+    // Texture varies over the surface.
+    const BrushTool& texture = tools[2];
+    double lo = 1e9, hi = -1e9;
+    for (int i = 0; i < 50; ++i) {
+        const double w = texture.weight(0.2, glm::vec3(i * 0.13f, i * 0.07f, 0.0f));
+        lo = std::min(lo, w);
+        hi = std::max(hi, w);
+    }
+    CHECK(hi - lo > 0.5);
+
+    // Custom tool: a flat-topped profile with a falloff; saved and loaded unchanged.
+    BrushTool custom;
+    custom.name = "Flat stamp";
+    custom.kind = BrushKind::Custom;
+    custom.profile = {{0.0, 1.0}, {0.6, 1.0}, {1.0, 0.0}};
+    custom.falloffStart = 0.7;
+    custom.falloffPower = 2.0;
+    CHECK(custom.weight(0.3, {}) == doctest::Approx(1.0));
+    CHECK(custom.weight(0.9, {}) < custom.weight(0.75, {}));
+    test::TempDir dir;
+    saveBrushTool(dir.path() / "flat.json", custom);
+    const BrushTool back = loadBrushTool(dir.path() / "flat.json");
+    CHECK(back.name == "Flat stamp");
+    CHECK(back.kind == BrushKind::Custom);
+    CHECK(back.profile.size() == 3);
+    CHECK(back.weight(0.85, {}) == doctest::Approx(custom.weight(0.85, {})));
+    CHECK(loadBrushTools(dir.path()).size() == 1);
+    CHECK_THROWS(brushToolFromJson("{\"format\": \"something else\"}"));
+
+    // On a crown shell: add raises the surface under the tool, remove lowers it, flatten levels a cusp.
+    const Fixture& f = fixture();
+    const PrepScan prep(f.scan);
+    const glm::vec3 click(transformPoint(f.toScan, glm::dvec3(0.0, 0.0, 4.5)));
+    const auto det = detectMargin(prep, click);
+    REQUIRE(det);
+    auto die = extractDie(prep, det->line, click);
+    REQUIRE(die);
+    CrownFrame frame;
+    frame.origin = centroid(det->line.points(*f.scan));
+    frame.axis = optimizeInsertionAxis(die->mesh, det->occlusalDirection);
+    estimateToothOrientation(*f.scan, det->line.points(*f.scan), frame);
+    const CrownBase base = makeCrownBase(*die, frame, CrownParameters{});
+    const CrownMesh shell = buildCrown(base, CrownParameters{}, {}, true);
+    const glm::vec3 top = shell.mesh.positions[shell.mesh.vertexCount() - 1];
+    std::vector<float> disp;
+    applyBrushTool(shell, disp, top, 1.5f, 0.2f, BrushMode::Add, knife);
+    CHECK(disp[shell.mesh.vertexCount() - 1] == doctest::Approx(0.2f).epsilon(0.05));
+    applyBrushTool(shell, disp, top, 1.5f, 0.2f, BrushMode::Remove, knife);
+    CHECK(std::abs(disp[shell.mesh.vertexCount() - 1]) < 1e-5f);
+    std::vector<float> flat;
+    applyBrushTool(shell, flat, top, 2.5f, 0.3f, BrushMode::Flatten, ball);
+    float moved = 0.0f;
+    for (float d : flat)
+        moved = std::max(moved, std::abs(d));
+    CHECK(moved > 0.01f);
+    for (std::uint32_t v = 0; v < shell.outerBegin; ++v)
+        CHECK(flat[v] == 0.0f); // the die cap is never edited
 }

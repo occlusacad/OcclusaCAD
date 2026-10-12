@@ -5,6 +5,7 @@
 #include "core/Dental.h"
 #include "core/Geometry.h"
 #include "core/Log.h"
+#include "core/crown/Brush.h"
 #include "core/crown/InsertionAxis.h"
 #include "core/crown/ToothLibrary.h"
 #include "core/Platform.h"
@@ -14,6 +15,7 @@
 #include "ui/Widgets.h"
 
 #include <imgui.h>
+#include <imgui_stdlib.h>
 #include <json.hpp>
 
 #include <cmath>
@@ -351,29 +353,60 @@ void updateDieOverlay(DesignerApp& app, const RestorationDesign& r, bool visible
     doc.setOverlay(key("die", r.tooth), std::move(dm));
 }
 
+// The outer part of a shell (its cap over the die would z-fight with the scan).
+Mesh shellOuter(const crown::CrownMesh& c)
+{
+    Mesh m;
+    m.positions = c.mesh.positions;
+    m.normals = c.mesh.normals;
+    m.colors = c.mesh.colors;
+    for (std::size_t t = 0; t + 2 < c.mesh.indices.size(); t += 3)
+        if (c.mesh.indices[t] >= c.outerBegin || c.mesh.indices[t + 1] >= c.outerBegin || c.mesh.indices[t + 2] >= c.outerBegin)
+            m.indices.insert(m.indices.end(), {c.mesh.indices[t], c.mesh.indices[t + 1], c.mesh.indices[t + 2]});
+    return m;
+}
+
+// What the 3D view shows of a restoration depends on the step: nothing while the margin and axis
+// are edited, the crown bottom in its step, the free library tooth or the adapted shell during
+// tooth placement and free-forming, and the merged crown from the merge step on.
 void updateCrownOverlay(DesignerApp& app, const RestorationDesign& r, bool distanceMap)
 {
-    // Crowns would hide the preparation while the margin or the axis is being edited.
-    const bool visible = app.currentStep() != StepId::MarginLine && app.currentStep() != StepId::InsertionAxis;
     Document& doc = app.doc();
-    if (!r.crown) {
-        doc.removeOverlay(key("crown", r.tooth));
-        return;
-    }
-    Mesh m = r.crown->mesh;
-    if (distanceMap && r.contacts) {
-        const auto d = crown::contactDistances(*r.crown, *r.contacts);
-        m.colors.assign(m.positions.size(), kCrownColor);
-        for (std::size_t v = r.crown->outerBegin; v < d.size(); ++v)
-            m.colors[v] = contactColor(d[v]);
-    }
+    const StepId step = app.currentStep();
+    const std::string k = key("crown", r.tooth);
+    const bool hidden = step == StepId::MarginLine || step == StepId::InsertionAxis || step == StepId::CrownBottom;
     DisplayMesh dm;
-    dm.gpu = std::make_unique<gfx::GpuMesh>(m);
     dm.scanId = r.prepScanId;
     dm.color = kCrownColor;
-    dm.vertexColors = distanceMap;
-    dm.visible = visible;
-    doc.setOverlay(key("crown", r.tooth), std::move(dm));
+    dm.visible = !hidden;
+    const bool editing = step == StepId::ToothPlacement || step == StepId::Freeforming || step == StepId::Connectors;
+    if (!editing && !hidden)
+        if (const BridgeDesign* b = doc.bridgeOf(r.tooth); b && b->result && b->result->ok) {
+            doc.removeOverlay(k); // the merged bridge is shown instead
+            return;
+        }
+    const bool showMerged = r.merged && r.merged->ok && !editing;
+    if (showMerged) {
+        dm.gpu = std::make_unique<gfx::GpuMesh>(r.merged->mesh);
+    } else if (r.adapted && r.crown) {
+        Mesh m = shellOuter(*r.crown);
+        if (distanceMap && r.contacts && step == StepId::Freeforming) {
+            const auto d = crown::contactDistances(*r.crown, *r.contacts);
+            m.colors.assign(m.positions.size(), kCrownColor);
+            for (std::size_t v = r.crown->outerBegin; v < d.size(); ++v)
+                m.colors[v] = contactColor(d[v]);
+            dm.vertexColors = true;
+        }
+        dm.gpu = std::make_unique<gfx::GpuMesh>(m);
+    } else if (r.placed && r.libraryTooth) {
+        dm.gpu = std::make_unique<gfx::GpuMesh>(*r.libraryTooth);
+        dm.color = glm::vec3(0.93f, 0.90f, 0.80f);
+        dm.opacity = 0.85f;
+    } else {
+        doc.removeOverlay(k);
+        return;
+    }
+    doc.setOverlay(k, std::move(dm));
 }
 
 void setOverlaysVisible(DesignerApp& app, const std::string& prefix, bool visible)
@@ -622,7 +655,8 @@ struct UnitSnapshot {
     int tooth = 0;
     bool pontic = false;
     std::shared_ptr<const crown::CrownBase> base;
-    std::shared_ptr<const crown::CrownMesh> crown;
+    std::shared_ptr<const crown::CrownMesh> crown; // the shell (connector placement)
+    std::shared_ptr<const Mesh> solid;             // the merged unit (bridge union)
 };
 
 // Connectors between neighbouring units: above the margins / ridge plus the embrasure clearance,
@@ -670,7 +704,7 @@ std::shared_ptr<const crown::BridgeUnion> mergeBridge(const std::vector<UnitSnap
     std::vector<Mesh> cavities;
     for (const auto& u : units) {
         crown::BridgeUnionPart part;
-        part.mesh = &u.crown->mesh;
+        part.mesh = u.solid ? u.solid.get() : &u.crown->mesh;
         if (!u.pontic) {
             part.ownCavity = static_cast<int>(cavities.size());
             cavities.push_back(crown::makeCavity(*u.base));
@@ -686,9 +720,9 @@ std::vector<UnitSnapshot> bridgeUnits(DesignerApp& app, const BridgeDesign& b)
     std::vector<UnitSnapshot> units;
     for (int t : b.teeth) {
         RestorationDesign* u = findRestoration(app, t);
-        if (!u || !u->base || !u->crown)
+        if (!u || !u->base || !u->crown || !u->adapted)
             return {};
-        units.push_back({t, u->isPontic(), u->base, u->crown});
+        units.push_back({t, u->isPontic(), u->base, u->crown, nullptr});
     }
     return units;
 }
@@ -700,7 +734,7 @@ void updateConnectorOverlays(DesignerApp& app, const BridgeDesign& b)
     RestorationDesign* first = findRestoration(app, b.teeth.front());
     if (!first)
         return;
-    const bool visible = app.currentStep() != StepId::MarginLine && app.currentStep() != StepId::InsertionAxis;
+    const bool visible = app.currentStep() == StepId::Connectors;
     for (std::size_t i = 0; i < b.connectors.size(); ++i) {
         DisplayMesh dm;
         dm.gpu = std::make_unique<gfx::GpuMesh>(crown::makeConnectorMesh(b.connectors[i]));
@@ -724,21 +758,42 @@ void bridgeChanged(DesignerApp& app, BridgeDesign& b)
     updateConnectorOverlays(app, b);
 }
 
+// Rebuild what the restoration currently is: the adapted shell (with its free-forming) or the
+// free library tooth. The merged crown is out of date afterwards.
 void regenerate(DesignerApp& app, RestorationDesign& r, bool distanceMap)
 {
     if (!ensureBase(app, r))
         return;
     const crown::CrownParameters params = r.effectiveParams();
-    auto c = std::make_shared<crown::CrownMesh>(crown::buildCrown(*r.base, params, r.displacement));
-    if (!r.displacement.empty() && r.displacement.size() != c->mesh.vertexCount()) {
-        r.displacement.clear();
-        c = std::make_shared<crown::CrownMesh>(crown::buildCrown(*r.base, params, r.displacement));
+    r.merged.reset();
+    if (r.adapted) {
+        auto c = std::make_shared<crown::CrownMesh>(crown::buildCrown(*r.base, params, r.displacement, true));
+        if (!r.displacement.empty() && r.displacement.size() != c->mesh.vertexCount()) {
+            r.displacement.clear();
+            c = std::make_shared<crown::CrownMesh>(crown::buildCrown(*r.base, params, r.displacement, true));
+        }
+        r.crown = c;
+        r.libraryTooth.reset();
+    } else {
+        r.crown.reset();
+        r.libraryTooth = r.placed ? std::make_shared<const Mesh>(crown::placedLibraryTooth(*r.base, params)) : nullptr;
     }
-    r.crown = c;
-    r.crownGenerated = true;
     updateCrownOverlay(app, r, distanceMap);
     if (BridgeDesign* b = app.doc().bridgeOf(r.tooth))
         bridgeChanged(app, *b);
+}
+
+// The crown bottom solid (cement gap, border, minimum thickness); pontics have none.
+bool ensureBottom(DesignerApp& app, RestorationDesign& r)
+{
+    if (r.isPontic())
+        return true;
+    if (r.bottom)
+        return true;
+    if (!ensureBase(app, r))
+        return false;
+    r.bottom = std::make_shared<const Mesh>(crown::makeCrownBottom(*r.base, r.effectiveParams()));
+    return true;
 }
 
 void marginChanged(DesignerApp& app, RestorationDesign& r)
@@ -747,7 +802,7 @@ void marginChanged(DesignerApp& app, RestorationDesign& r)
     r.insertionAxis.reset();
     r.orientation.reset();
     r.displacement.clear();
-    r.crownGenerated = false;
+    r.placed = r.adapted = false;
     app.doc().removeOverlay(key("crown", r.tooth));
     app.doc().removeOverlay(key("die", r.tooth));
     if (BridgeDesign* b = app.doc().bridgeOf(r.tooth)) {
@@ -810,6 +865,8 @@ void startMarginDetection(DesignerApp& app, int tooth, const glm::vec3& local)
 
 void startBridgeAutoDesign(DesignerApp& app, BridgeDesign& b, bool distanceMap);
 
+// Auto position (tooth placement): the library tooth is sized between the neighbours and its
+// height fitted to the antagonist. It stays free (not attached to the margin).
 void startAutoDesign(DesignerApp& app, int tooth, bool distanceMap)
 {
     if (BridgeDesign* b = app.doc().bridgeOf(tooth)) {
@@ -824,40 +881,33 @@ void startAutoDesign(DesignerApp& app, int tooth, bool distanceMap)
     crown::CrownParameters params = r->params;
     params.crownHeight = 0.0;
     params.halfMesial = params.halfDistal = params.halfBuccal = params.halfLingual = 0.0;
-    params.rotationDeg = 0.0;
-    app.tasks().start("Designing crown", [&app, tooth, base, contacts, params, distanceMap](const ProgressFn& progress) -> ui::TaskRunner::Continuation {
+    params.rotationDeg = params.tiltMesialDeg = params.tiltBuccalDeg = 0.0;
+    params.shiftMesial = params.shiftBuccal = params.shiftOcclusal = 0.0;
+    app.tasks().start("Positioning the tooth", [&app, tooth, base, contacts, params, distanceMap](const ProgressFn& progress) -> ui::TaskRunner::Continuation {
         crown::CrownParameters p = params;
         reportProgress(progress, 0.1f, "Fitting to the neighbouring teeth");
         crown::fitProximal(*base, *contacts, p);
-        reportProgress(progress, 0.35f, "Fitting to the antagonist");
-        crown::fitOcclusalHeight(*base, *contacts, p);
-        reportProgress(progress, 0.6f, "Adapting contacts");
-        std::vector<float> disp;
-        if (!p.coping)
-            crown::adaptContacts(*base, p, *contacts, disp, true, contacts->antagonist != nullptr);
-        auto c = std::make_shared<crown::CrownMesh>(crown::buildCrown(*base, p, disp));
-        return [&app, tooth, p, disp, c, distanceMap] {
+        reportProgress(progress, 0.5f, "Fitting to the antagonist");
+        crown::fitOcclusalHeight(*base, *contacts, p, {}, true);
+        return [&app, tooth, p, distanceMap] {
             RestorationDesign* r = findRestoration(app, tooth);
             if (!r)
                 return;
             r->params = p;
-            r->displacement = disp;
-            r->crown = c;
-            r->crownGenerated = true;
-            updateCrownOverlay(app, *r, distanceMap);
+            r->placed = true;
+            regenerate(app, *r, distanceMap);
             app.markModified();
-            log::info("Crown {} designed: {:.0f} mm3, min. thickness {:.2f} mm{}", app.toothText(tooth), c->volume, c->minThickness, c->watertight ? "" : " (not watertight)");
+            log::info("Tooth {} positioned", app.toothText(tooth));
         };
     });
 }
 
-// Designs all units of a bridge together: outer contacts from the scan, inner sides meeting at
-// the neighbours, heights from the antagonist, contacts adapted, then connectors and the merge.
+// Positions all units of a bridge together: outer contacts from the scan, inner sides meeting at
+// the neighbours, heights from the antagonist.
 void startBridgeAutoDesign(DesignerApp& app, BridgeDesign& b, bool distanceMap)
 {
     struct Unit {
         int tooth;
-        bool pontic;
         std::shared_ptr<const crown::CrownBase> base;
         std::shared_ptr<const crown::ContactScene> contacts;
         crown::CrownParameters params;
@@ -873,23 +923,12 @@ void startBridgeAutoDesign(DesignerApp& app, BridgeDesign& b, bool distanceMap)
         crown::CrownParameters p = u->effectiveParams();
         p.crownHeight = 0.0;
         p.halfMesial = p.halfDistal = p.halfBuccal = p.halfLingual = 0.0;
-        p.rotationDeg = 0.0;
-        units.push_back({t, u->isPontic(), u->base, u->contacts, p});
+        p.rotationDeg = p.tiltMesialDeg = p.tiltBuccalDeg = 0.0;
+        p.shiftMesial = p.shiftBuccal = p.shiftOcclusal = 0.0;
+        units.push_back({t, u->base, u->contacts, p});
     }
     const std::string label = bridgeName(app, b);
-    const dental::Numbering numbering = app.numbering();
-    const BridgeDesign settings = [&] {
-        BridgeDesign s;
-        s.teeth = b.teeth;
-        s.connectorArea = b.connectorArea;
-        s.connectorHeightRatio = b.connectorHeightRatio;
-        s.embrasure = b.embrasure;
-        s.edits = b.edits;
-        return s;
-    }();
-    const glm::dvec3 axis = *b.axis;
-    app.tasks().start("Designing bridge " + label, [&app, units, settings, axis, label, distanceMap, numbering](const ProgressFn& progress) mutable
-                      -> ui::TaskRunner::Continuation {
+    app.tasks().start("Positioning bridge " + label, [&app, units, label, distanceMap](const ProgressFn& progress) mutable -> ui::TaskRunner::Continuation {
         reportProgress(progress, 0.05f, "Fitting the units");
         for (auto& u : units)
             crown::fitProximal(*u.base, *u.contacts, u.params);
@@ -897,74 +936,125 @@ void startBridgeAutoDesign(DesignerApp& app, BridgeDesign& b, bool distanceMap)
         for (auto& u : units)
             fit.push_back({u.base->frame, &u.params});
         crown::fitBridgeWidths(fit);
-        reportProgress(progress, 0.25f, "Fitting to the antagonist");
+        reportProgress(progress, 0.5f, "Fitting to the antagonist");
         for (auto& u : units)
-            crown::fitOcclusalHeight(*u.base, *u.contacts, u.params);
-        reportProgress(progress, 0.45f, "Adapting contacts");
-        std::vector<std::vector<float>> disp(units.size());
-        std::vector<UnitSnapshot> snaps;
-        for (std::size_t i = 0; i < units.size(); ++i) {
-            auto& u = units[i];
-            if (!u.params.coping)
-                crown::adaptContacts(*u.base, u.params, *u.contacts, disp[i], true, u.contacts->antagonist != nullptr);
-            snaps.push_back({u.tooth, u.pontic, u.base, std::make_shared<const crown::CrownMesh>(crown::buildCrown(*u.base, u.params, disp[i]))});
-        }
-        reportProgress(progress, 0.8f, "Connectors and merging");
-        std::vector<std::string> warnings;
-        auto connectors = placeConnectors(snaps, axis, settings, warnings, numbering);
-        auto merged = mergeBridge(snaps, connectors);
-        return [&app, units, disp, snaps, connectors, merged, warnings, label, distanceMap] {
-            for (std::size_t i = 0; i < units.size(); ++i) {
-                RestorationDesign* r = findRestoration(app, units[i].tooth);
-                if (!r)
-                    return;
-                r->params = units[i].params;
-                r->displacement = disp[i];
-                r->crown = snaps[i].crown;
-                r->crownGenerated = true;
-                updateCrownOverlay(app, *r, distanceMap);
-            }
-            if (BridgeDesign* b = app.doc().bridgeOf(units.front().tooth)) {
-                b->connectors = connectors;
-                b->warnings = warnings;
-                b->result = merged;
-                updateConnectorOverlays(app, *b);
-            }
+            crown::fitOcclusalHeight(*u.base, *u.contacts, u.params, {}, true);
+        return [&app, units, label, distanceMap] {
+            for (const auto& u : units)
+                if (RestorationDesign* r = findRestoration(app, u.tooth)) {
+                    // Effective parameters of pontics are derived; keep the technician's own settings.
+                    const crown::CrownParameters own = r->params;
+                    r->params = u.params;
+                    if (r->isPontic()) {
+                        r->params.cementGap = own.cementGap;
+                        r->params.borderHorizontal = own.borderHorizontal;
+                        r->params.anticipateMilling = own.anticipateMilling;
+                    }
+                    r->placed = true;
+                    regenerate(app, *r, distanceMap);
+                }
             app.markModified();
-            if (merged->ok)
-                log::info("Bridge {} designed: {:.0f} mm3, {}, connectors {}", label, merged->volume, merged->watertight ? "watertight" : "NOT watertight",
-                          [&] {
-                              std::string s;
-                              for (double a : merged->connectorAreas)
-                                  s += std::format("{}{:.1f} mm2", s.empty() ? "" : ", ", a);
-                              return s;
-                          }());
-            else
-                log::warn("Bridge {} could not be merged: {}", label, merged->error);
-            for (const auto& w : warnings)
-                if (!w.empty())
-                    log::warn("Bridge {}: {}", label, w);
+            log::info("Bridge {} positioned", label);
         };
     });
 }
 
-// Merge a bridge whose units are designed (on the worker thread).
-void startBridgeMerge(DesignerApp& app, BridgeDesign& b)
+// Adapt to margin: the positioned library tooth becomes a zero-thickness shell attached to the
+// margin (all units of a bridge together). Free-forming starts from the library shape.
+void adaptToMargin(DesignerApp& app, int tooth, bool distanceMap)
 {
-    auto units = bridgeUnits(app, b);
-    if (units.empty())
+    std::vector<int> teeth = {tooth};
+    if (BridgeDesign* b = app.doc().bridgeOf(tooth))
+        teeth = b->teeth;
+    for (int t : teeth)
+        if (RestorationDesign* r = findRestoration(app, t); r && ensureBase(app, *r)) {
+            r->placed = true;
+            r->adapted = true;
+            r->displacement.clear();
+            regenerate(app, *r, distanceMap);
+        }
+    app.markModified();
+}
+
+// Merge: every crown united with its crown bottom minus the preparation space; bridges joined
+// with their connectors (on a worker thread).
+void startMergeAll(DesignerApp& app)
+{
+    struct Job {
+        int tooth;
+        bool pontic;
+        std::shared_ptr<const crown::CrownBase> base;
+        std::shared_ptr<const crown::CrownMesh> shell;
+        std::shared_ptr<const Mesh> bottom;
+    };
+    struct BridgeJob {
+        int firstTooth;
+        std::vector<int> teeth;
+        std::vector<crown::ConnectorSpec> connectors;
+    };
+    std::vector<Job> jobs;
+    std::vector<BridgeJob> bridges;
+    for (auto& r : app.doc().restorations) {
+        if (!r.supported() || !r.adapted || !r.crown || !ensureBottom(app, r))
+            continue;
+        jobs.push_back({r.tooth, r.isPontic(), r.base, r.crown, r.isPontic() ? std::make_shared<const Mesh>() : r.bottom});
+    }
+    for (auto& b : app.doc().bridges) {
+        if (b.connectors.empty())
+            bridgeChanged(app, b);
+        bridges.push_back({b.teeth.front(), b.teeth, b.connectors});
+    }
+    if (jobs.empty())
         return;
-    auto connectors = b.connectors;
-    const std::string label = bridgeName(app, b);
-    const int firstTooth = b.teeth.front();
-    app.tasks().start("Merging bridge " + label, [&app, units, connectors, firstTooth](const ProgressFn& progress) -> ui::TaskRunner::Continuation {
-        reportProgress(progress, 0.2f, "Joining units and connectors");
-        auto merged = mergeBridge(units, connectors);
-        return [&app, merged, firstTooth] {
-            if (BridgeDesign* b = app.doc().bridgeOf(firstTooth))
-                b->result = merged;
-            if (!merged->ok)
-                ui::showError("Bridge", "The bridge could not be merged: " + merged->error);
+    app.tasks().start("Merging", [&app, jobs, bridges](const ProgressFn& progress) -> ui::TaskRunner::Continuation {
+        std::map<int, std::shared_ptr<const crown::CrownMerge>> merged;
+        for (std::size_t i = 0; i < jobs.size(); ++i) {
+            const auto& j = jobs[i];
+            reportProgress(progress, 0.8f * static_cast<float>(i) / static_cast<float>(jobs.size()), "Uniting the crown with its bottom");
+            merged[j.tooth] = std::make_shared<const crown::CrownMerge>(crown::mergeCrown(*j.base, *j.shell, *j.bottom));
+        }
+        std::map<int, std::shared_ptr<const crown::BridgeUnion>> unions;
+        for (const auto& b : bridges) {
+            reportProgress(progress, 0.85f, "Joining the bridge");
+            std::vector<UnitSnapshot> units;
+            bool ok = true;
+            for (int t : b.teeth) {
+                auto it = merged.find(t);
+                const Job* job = nullptr;
+                for (const auto& j : jobs)
+                    if (j.tooth == t)
+                        job = &j;
+                if (it == merged.end() || !it->second->ok || !job) {
+                    ok = false;
+                    break;
+                }
+                UnitSnapshot u{t, job->pontic, job->base, job->shell, nullptr};
+                u.solid = std::shared_ptr<const Mesh>(it->second, &it->second->mesh);
+                units.push_back(u);
+            }
+            if (ok && !b.connectors.empty())
+                unions[b.firstTooth] = mergeBridge(units, b.connectors);
+        }
+        return [&app, merged, unions] {
+            for (const auto& [tooth, m] : merged)
+                if (RestorationDesign* r = findRestoration(app, tooth)) {
+                    r->merged = m;
+                    updateCrownOverlay(app, *r, false);
+                    if (m->ok)
+                        log::info("{} {} merged: {:.0f} mm3, min. thickness {:.2f} mm, {}", r->isPontic() ? "Pontic" : "Crown", app.toothText(tooth), m->volume,
+                                  m->minThickness, m->watertight ? "watertight" : "NOT watertight");
+                    else
+                        log::warn("{} could not be merged: {}", app.toothText(tooth), m->error);
+                }
+            for (const auto& [first, u] : unions)
+                if (BridgeDesign* b = app.doc().bridgeOf(first)) {
+                    b->result = u;
+                    if (u->ok)
+                        log::info("Bridge {} merged: {:.0f} mm3, {}", bridgeName(app, *b), u->volume, u->watertight ? "watertight" : "NOT watertight");
+                    else
+                        log::warn("Bridge {} could not be merged: {}", bridgeName(app, *b), u->error);
+                }
+            app.doc().redraw();
         };
     });
 }
@@ -1029,8 +1119,12 @@ bool drawRestorationCard(DesignerApp& app, bool showScans)
                 label += "  (bridge " + bridgeName(app, *b) + ")";
             if (!r.supported())
                 label += "  (not supported yet)";
-            else if (r.crownGenerated)
-                label += "  - designed";
+            else if (r.merged && r.merged->ok)
+                label += "  - merged";
+            else if (r.adapted)
+                label += "  - adapted";
+            else if (r.placed)
+                label += "  - placed";
             else if (r.marginClosed())
                 label += "  - margin set";
             if (ImGui::Selectable(label.c_str(), static_cast<int>(i) == doc.activeRestoration)) {
@@ -1111,8 +1205,8 @@ std::optional<std::string> firstMissing(const DesignerApp& appC, bool needMargin
         if (r.isPontic()) {
             if (!doc.bridgeOf(r.tooth))
                 return std::format("Pontic {} needs a crown on a neighbouring tooth (bridge abutment).", app.toothText(r.tooth));
-            if (needCrown && !r.crownGenerated)
-                return std::format("Design pontic {}.", app.toothText(r.tooth));
+            if (needCrown && !r.adapted)
+                return std::format("Adapt pontic {} (tooth placement).", app.toothText(r.tooth));
             continue;
         }
         if (needMargin && !r.marginClosed())
@@ -1121,8 +1215,8 @@ std::optional<std::string> firstMissing(const DesignerApp& appC, bool needMargin
             return std::format("Tooth {}: {}", app.toothText(r.tooth), r.dieError);
         if (needAxis && !r.insertionAxis)
             return std::format("Set the insertion axis of tooth {}.", app.toothText(r.tooth));
-        if (needCrown && !r.crownGenerated)
-            return std::format("Design the crown of tooth {}.", app.toothText(r.tooth));
+        if (needCrown && !r.adapted)
+            return std::format("Position tooth {} and adapt it to the margin.", app.toothText(r.tooth));
     }
     if (needCrown)
         for (const auto& b : doc.bridges)
@@ -1752,34 +1846,371 @@ private:
 // Crown design
 // ---------------------------------------------------------------------------
 
-class CrownDesignStep final : public Step {
+
+// ---------------------------------------------------------------------------
+// Crown bottom (the inside of the crown)
+// ---------------------------------------------------------------------------
+
+// Colours of the crown bottom map on the die.
+glm::vec3 bottomColor(const crown::CrownBase& b, std::size_t i)
+{
+    if (b.blockoutDepth[i] > 0.02f)
+        return glm::mix(glm::vec3(0.95f, 0.55f, 0.20f), glm::vec3(0.90f, 0.20f, 0.20f), std::clamp(b.blockoutDepth[i] / 0.5f, 0.0f, 1.0f));
+    if (!b.toolCompensation.empty() && b.toolCompensation[i] > 0.01f)
+        return {0.80f, 0.35f, 0.85f};
+    return b.gap[i] > 0.005f ? glm::vec3(0.95f, 0.85f, 0.20f) : glm::vec3(0.35f, 0.80f, 0.35f);
+}
+
+class CrownBottomStep final : public Step {
 public:
-    CrownDesignStep() : Step(StepId::CrownDesign) {}
+    CrownBottomStep() : Step(StepId::CrownBottom) {}
 
     ViewLayout preferredLayout() const override { return ViewLayout::Single3D; }
-
-    std::optional<std::string> blocker(const DesignerApp& app) const override { return firstMissing(app, true, true, true); }
+    std::optional<std::string> blocker(const DesignerApp& app) const override { return firstMissing(app, true, true, false); }
 
     void onEnter(DesignerApp& app) override
     {
         syncRestorations(app);
-        app.view3D(ViewId::Main3D).pickCursor = brush_ != 0;
-        setOverlaysVisible(app, "die:", false);
         setAntagonistVisible(app, false);
+        setOverlaysVisible(app, "die:", false);
+        setRestorationsVisible(app, false);
+        viewPending_ = true;
+    }
+
+    void onLeave(DesignerApp& app) override
+    {
+        app.doc().removeOverlaysWithPrefix("bottommap:");
+        app.doc().removeOverlaysWithPrefix("bottom:");
+        setAntagonistVisible(app, true);
+        setRestorationsVisible(app, true);
+    }
+
+    void update(DesignerApp& app) override
+    {
+        if (!viewPending_ || app.loading() || restorationsPending(app))
+            return;
+        RestorationDesign* r = app.doc().active();
+        if (r && r->supported() && !r->isPontic()) {
+            if (!prepScanFor(app, r->prepScanId)) {
+                requestPrepScan(app, r->prepScanId);
+                return;
+            }
+            viewPending_ = false;
+            setAntagonistVisible(app, false); // the scans may have loaded after onEnter
+            refresh(app);
+            viewOcclusal(app, *r, 35.0);
+        } else {
+            viewPending_ = false;
+        }
+    }
+
+    void drawPanel(DesignerApp& app) override
+    {
+        const ui::Palette& pal = ui::palette();
+        if (drawRestorationCard(app, false)) {
+            refresh(app);
+            if (RestorationDesign* r = app.doc().active())
+                focusOn(app, *r);
+        }
+        RestorationDesign* r = app.doc().active();
+        if (!r || !r->supported())
+            return;
+        if (r->isPontic()) {
+            ImGui::Spacing();
+            ui::wrappedMutedText("A pontic rests on the ridge and has no crown bottom.");
+            return;
+        }
+        if (!ensureBase(app, *r)) {
+            ImGui::Spacing();
+            ui::wrappedMutedText(r->dieError.empty() ? "Define the margin line and insertion axis first." : r->dieError.c_str());
+            return;
+        }
+        crown::CrownParameters& p = r->params;
+        bool changed = false;
+        const float full = -FLT_MIN;
+        // Sliders apply when released (the crown bottom takes a moment to rebuild).
+        auto mm = [&](const char* id, double& value, float lo, float hi, const char* fmt) {
+            float v = static_cast<float>(value);
+            ImGui::SetNextItemWidth(full);
+            if (ImGui::SliderFloat(id, &v, lo, hi, fmt))
+                value = v;
+            changed |= ImGui::IsItemDeactivatedAfterEdit();
+        };
+        ImGui::Spacing();
+        ImGui::SetNextItemWidth(full);
+        ui::segmented("bottomtab", {"Gap", "Border", "Advanced"}, tab_);
+        ImGui::Spacing();
+        ui::beginCard("##bottom");
+        if (tab_ == 0) {
+            ui::subheading("Cement gap");
+            mm("##gap", p.cementGap, 0.0f, 0.2f, "Gap  %.3f mm");
+            mm("##from", p.distanceToMargin, 0.0f, 3.0f, "No gap from margin  %.2f mm");
+            ui::mutedText("Yellow: cement gap. Green: no cement gap.");
+            ImGui::Spacing();
+            ui::subheading("Additional spacing");
+            const double ax0 = p.axialSpacing, rad0 = p.radialSpacing;
+            mm("##ax", p.axialSpacing, 0.0f, 0.2f, "Axial  %.3f mm");
+            mm("##rad", p.radialSpacing, 0.0f, 0.2f, "Radial  %.3f mm");
+            if (linkSpacing_) {
+                if (p.axialSpacing != ax0)
+                    p.radialSpacing = p.axialSpacing;
+                else if (p.radialSpacing != rad0)
+                    p.axialSpacing = p.radialSpacing;
+            }
+            ImGui::Checkbox("Link axial and radial", &linkSpacing_);
+        } else if (tab_ == 1) {
+            ui::subheading("Crown border");
+            mm("##bh", p.borderHorizontal, 0.0f, 1.0f, "1. Horizontal  %.2f mm");
+            mm("##ba", p.borderAngled, 0.0f, 1.5f, "2. Angled  %.2f mm");
+            mm("##bang", p.borderAngleDeg, 0.0f, 90.0f, "3. Angle  %.0f\xC2\xB0");
+            mm("##bv", p.borderVertical, 0.0f, 1.5f, "4. Vertical  %.2f mm");
+            mm("##bm", p.belowMargin, -0.5f, 0.5f, "5. Below margin  %.2f mm");
+            drawBorderDiagram(p);
+            ui::wrappedMutedText("Zirconia commonly needs at least 0.2 mm horizontally. Angled and vertical are often 0.");
+        } else {
+            ui::subheading("Undercuts");
+            bool keep = !p.blockOutUndercuts;
+            if (ImGui::Checkbox("Don't block out undercuts", &keep)) {
+                p.blockOutUndercuts = !keep;
+                changed = true;
+            }
+            if (p.blockOutUndercuts || p.bullnoseTool) {
+                mm("##boa", p.blockoutAngleDeg, 0.0f, 15.0f, "Angle  %.1f\xC2\xB0");
+                mm("##bou", p.blockoutUntouchable, 0.0f, 2.0f, "Untouchable zone at margin  %.2f mm");
+            }
+            ImGui::Spacing();
+            ui::subheading("Milling");
+            if (ImGui::Checkbox("Anticipate milling (tool compensation)", &p.anticipateMilling))
+                changed = true;
+            if (p.anticipateMilling) {
+                mm("##tool", p.toolDiameter, 0.3f, 2.5f, "Tool diameter  %.2f mm");
+                ui::mutedText("Choose slightly above the smallest tool used.");
+                if (ImGui::Checkbox("Bullnose / flat tool", &p.bullnoseTool))
+                    changed = true;
+                if (p.bullnoseTool)
+                    mm("##flat", p.toolFlatPercent, 0.0f, 100.0f, "Tool tip flat  %.0f %%");
+            } else {
+                ui::mutedText("3D printing: no tool compensation.");
+            }
+            ImGui::Spacing();
+            mm("##minth", p.minThickness, 0.2f, 2.0f, "Minimum thickness  %.2f mm");
+        }
+        ui::endCard();
+
+        if (r->base) {
+            const auto& b = *r->base;
+            float bo = 0.0f, tc = 0.0f;
+            for (std::size_t i = 0; i < b.blockoutDepth.size(); ++i) {
+                bo = std::max(bo, b.blockoutDepth[i]);
+                tc = std::max(tc, b.toolCompensation.empty() ? 0.0f : b.toolCompensation[i]);
+            }
+            ImGui::Spacing();
+            ui::mutedText("Blocked out up to %.2f mm, tool compensation up to %.2f mm", bo, tc);
+            auto legend = [&](glm::vec3 c, const char* t) {
+                ImGui::ColorButton(t, ImVec4(c.r, c.g, c.b, 1.0f), ImGuiColorEditFlags_NoTooltip, ImVec2(ImGui::GetFontSize(), ImGui::GetFontSize()));
+                ImGui::SameLine();
+                ui::mutedText("%s", t);
+            };
+            legend({0.35f, 0.80f, 0.35f}, "No gap");
+            ImGui::SameLine();
+            legend({0.95f, 0.85f, 0.20f}, "Gap");
+            ImGui::SameLine();
+            legend({0.90f, 0.20f, 0.20f}, "Blocked out");
+            ImGui::SameLine();
+            legend({0.80f, 0.35f, 0.85f}, "Tool");
+        }
+        ImGui::Spacing();
+        if (ImGui::Checkbox("Show crown bottom solid", &showSolid_))
+            refresh(app);
+        if (ui::button("Apply to all crowns", ImVec2(full, 0), app.doc().restorations.size() > 1)) {
+            for (auto& u : app.doc().restorations)
+                if (&u != r && !u.isPontic()) {
+                    const crown::CrownParameters own = u.params;
+                    u.params = p;
+                    // Keep everything that is not about the crown bottom.
+                    u.params.library = own.library;
+                    u.params.kind = own.kind;
+                    u.params.upper = own.upper;
+                    u.params.coping = own.coping;
+                    u.params.copingThickness = own.copingThickness;
+                    u.params.crownHeight = own.crownHeight;
+                    u.params.halfMesial = own.halfMesial;
+                    u.params.halfDistal = own.halfDistal;
+                    u.params.halfBuccal = own.halfBuccal;
+                    u.params.halfLingual = own.halfLingual;
+                    u.params.rotationDeg = own.rotationDeg;
+                    u.params.tiltMesialDeg = own.tiltMesialDeg;
+                    u.params.tiltBuccalDeg = own.tiltBuccalDeg;
+                    u.params.shiftMesial = own.shiftMesial;
+                    u.params.shiftBuccal = own.shiftBuccal;
+                    u.params.shiftOcclusal = own.shiftOcclusal;
+                    u.params.cuspScale = own.cuspScale;
+                    u.params.flipMesioDistal = own.flipMesioDistal;
+                    u.params.flipBuccoLingual = own.flipBuccoLingual;
+                    u.params.proximalTarget = own.proximalTarget;
+                    u.params.occlusalTarget = own.occlusalTarget;
+                    rebuildBase(u);
+                }
+            ui::toast(ui::ToastKind::Success, "Crown bottom settings applied to all crowns.");
+            app.markModified();
+        }
+        (void)pal;
+        if (changed) {
+            rebuildBase(*r);
+            refresh(app);
+            app.markModified();
+        }
+    }
+
+private:
+    // The base (intaglio) and everything built on it; the contact scene does not depend on it.
+    static void rebuildBase(RestorationDesign& r)
+    {
+        r.base.reset();
+        r.bottom.reset();
+        r.crown.reset();
+        r.libraryTooth.reset();
+        r.merged.reset();
+    }
+
+    void refresh(DesignerApp& app)
+    {
+        Document& doc = app.doc();
+        doc.removeOverlaysWithPrefix("bottommap:");
+        doc.removeOverlaysWithPrefix("bottom:");
+        for (std::size_t i = 0; i < doc.restorations.size(); ++i) {
+            RestorationDesign& r = doc.restorations[i];
+            if (!r.supported() || r.isPontic() || !ensureBase(app, r))
+                continue;
+            const bool active = static_cast<int>(i) == doc.activeRestoration;
+            Mesh m = *r.base->intaglio;
+            m.colors.resize(m.positions.size());
+            for (std::size_t v = 0; v < m.positions.size(); ++v)
+                m.colors[v] = bottomColor(*r.base, v);
+            DisplayMesh dm;
+            dm.gpu = std::make_unique<gfx::GpuMesh>(m);
+            dm.scanId = r.prepScanId;
+            dm.vertexColors = true;
+            dm.depthBias = true;
+            dm.opacity = active ? 1.0f : 0.6f;
+            doc.setOverlay(key("bottommap", r.tooth), std::move(dm));
+            if (showSolid_ && active && ensureBottom(app, r)) {
+                DisplayMesh sm;
+                sm.gpu = std::make_unique<gfx::GpuMesh>(*r.bottom);
+                sm.scanId = r.prepScanId;
+                sm.color = glm::vec3(0.85f, 0.88f, 0.95f);
+                sm.opacity = 0.35f;
+                doc.setOverlay(key("bottom", r.tooth), std::move(sm));
+            }
+        }
+    }
+
+    // The border profile as in exocad's dialog: preparation, margin, and the numbered parts.
+    static void drawBorderDiagram(const crown::CrownParameters& p)
+    {
+        const float s = ImGui::GetFontSize();
+        const ImVec2 size(ImGui::GetContentRegionAvail().x, s * 6.0f);
+        const ImVec2 o = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(size);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ui::Palette& pal = ui::palette();
+        // Scale so the border fills about half the width (at least 0.6 mm shown).
+        const double ang0 = glm::radians(p.borderAngleDeg);
+        const double reach = std::max(0.6, p.borderHorizontal + std::cos(ang0) * p.borderAngled + 0.2);
+        const double rise = std::max(0.4, std::sin(ang0) * p.borderAngled + p.borderVertical + 0.2);
+        const float scale = static_cast<float>(std::min(size.x * 0.5 / reach, size.y * 0.6 / rise)); // pixels per mm
+        const ImVec2 m(o.x + size.x * 0.3f, o.y + size.y * 0.8f + static_cast<float>(std::clamp(p.belowMargin, -0.2, 0.2)) * scale);
+        // Preparation (grey) and its shoulder.
+        dl->AddRectFilled(ImVec2(o.x + 4, o.y + 4), ImVec2(m.x, o.y + size.y - 4), IM_COL32(150, 150, 150, 120));
+        dl->AddRectFilled(ImVec2(o.x + 4, m.y), ImVec2(m.x + 4, o.y + size.y - 4), IM_COL32(60, 60, 60, 160));
+        const double ang = glm::radians(p.borderAngleDeg);
+        const ImVec2 p1(m.x + static_cast<float>(p.borderHorizontal) * scale, m.y);
+        const ImVec2 p2(p1.x + static_cast<float>(std::cos(ang) * p.borderAngled) * scale, p1.y - static_cast<float>(std::sin(ang) * p.borderAngled) * scale);
+        const ImVec2 p3(p2.x, p2.y - static_cast<float>(p.borderVertical) * scale);
+        const ImU32 col = ImGui::GetColorU32(pal.accent);
+        const float w = 2.5f;
+        dl->AddLine(m, p1, col, w);
+        dl->AddLine(p1, p2, col, w);
+        dl->AddLine(p2, p3, col, w);
+        dl->AddLine(p3, ImVec2(p3.x - s * 0.8f, o.y + 6), col, w); // on to the crown wall
+        dl->AddCircleFilled(m, s * 0.22f, IM_COL32(40, 190, 70, 255));
+        auto label = [&](ImVec2 at, const char* t) { dl->AddText(ImVec2(at.x + 3, at.y - s * 1.1f), ImGui::GetColorU32(pal.textMuted), t); };
+        label(ImVec2((m.x + p1.x) * 0.5f, m.y), "1");
+        if (p.borderAngled > 0.0)
+            label(ImVec2((p1.x + p2.x) * 0.5f + 4, (p1.y + p2.y) * 0.5f), "2");
+        if (p.borderVertical > 0.0)
+            label(ImVec2(p3.x + 4, (p2.y + p3.y) * 0.5f + s * 0.5f), "4");
+    }
+
+    int tab_ = 0;
+    bool linkSpacing_ = true;
+    bool showSolid_ = false;
+    bool viewPending_ = false;
+};
+
+// ---------------------------------------------------------------------------
+// Tooth placement, free-forming and connectors
+// ---------------------------------------------------------------------------
+
+// Folder of the technician's own free-forming tools.
+std::filesystem::path brushFolder()
+{
+    return platform::configDir() / "brushes";
+}
+
+std::string brushSlug(const std::string& name)
+{
+    std::string out;
+    for (char ch : name) {
+        if (std::isalnum(static_cast<unsigned char>(ch)))
+            out += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        else if (!out.empty() && out.back() != '-')
+            out += '-';
+    }
+    while (!out.empty() && out.back() == '-')
+        out.pop_back();
+    return out.empty() ? "tool" : out;
+}
+
+class CrownToolStep final : public Step {
+public:
+    explicit CrownToolStep(StepId id) : Step(id) {}
+
+    ViewLayout preferredLayout() const override { return ViewLayout::Single3D; }
+
+    std::optional<std::string> blocker(const DesignerApp& app) const override
+    {
+        if (id() == StepId::ToothPlacement)
+            return firstMissing(app, true, true, true);
+        return firstMissing(app, true, true, true);
+    }
+
+    void onEnter(DesignerApp& app) override
+    {
+        syncRestorations(app);
+        app.view3D(ViewId::Main3D).pickCursor = id() == StepId::Freeforming && brushOn_;
+        setOverlaysVisible(app, "die:", false);
+        setAntagonistVisible(app, id() == StepId::ToothPlacement);
+        setOverlaysVisible(app, "connector:", id() == StepId::Connectors);
         ready_ = false;
+        loadCustomTools();
         prepare(app);
     }
 
     void onLeave(DesignerApp& app) override
     {
-        app.view3D(ViewId::Main3D).pickCursor = false;
-        app.view3D(ViewId::Main3D).gizmoPivot.reset();
+        View3D& v = app.view3D(ViewId::Main3D);
+        v.pickCursor = false;
+        v.gizmoPivot.reset();
+        v.blockOrbit = false;
+        dragging_ = painting_ = false;
         for (auto& b : app.doc().bridges)
             if (b.selectedConnector >= 0) {
                 b.selectedConnector = -1;
                 updateConnectorOverlays(app, b);
             }
         setAntagonistVisible(app, true);
+        setOverlaysVisible(app, "connector:", true);
     }
 
     void update(DesignerApp& app) override
@@ -1790,257 +2221,32 @@ public:
 
     void drawPanel(DesignerApp& app) override
     {
-        const ui::Palette& pal = ui::palette();
-        drawRestorationCard(app, false);
+        if (drawRestorationCard(app, false))
+            if (RestorationDesign* r = app.doc().active())
+                focusOn(app, *r);
         RestorationDesign* r = app.doc().active();
-        if (!r || !r->supported())
+        if (id() != StepId::Connectors && (!r || !r->supported()))
             return;
         if (!ready_) {
             ImGui::Spacing();
             ui::wrappedMutedText("Preparing the design...");
             return;
         }
-        if (!ensureBase(app, *r)) {
+        if (r && r->supported() && !ensureBase(app, *r)) {
             ImGui::Spacing();
             ui::wrappedMutedText(r->dieError.empty() ? "Define the margin line and insertion axis first." : r->dieError.c_str());
             return;
         }
-        const bool busy = app.tasks().busy();
-        crown::CrownParameters before = r->params;
-        bool geometryChanged = false, baseChanged = false;
-        const float full = -FLT_MIN;
-
-        BridgeDesign* bridge = app.doc().bridgeOf(r->tooth);
-        ImGui::Spacing();
-        ui::beginCard("##crown");
-        ui::subheading(r->isPontic() ? "Pontic" : "Crown");
-        if (drawLibraryPicker(app, *r))
-            geometryChanged = true;
-        int kind = static_cast<int>(r->params.kind);
-        ImGui::SetNextItemWidth(full);
-        if (ImGui::BeginCombo("##kind", crown::toothTemplate(r->params.kind, r->params.upper).name)) {
-            for (int k = 0; k <= static_cast<int>(crown::ToothKind::SecondMolar); ++k)
-                if (ImGui::Selectable(crown::toothTemplate(static_cast<crown::ToothKind>(k), r->params.upper).name, k == kind)) {
-                    r->params.kind = static_cast<crown::ToothKind>(k);
-                    geometryChanged = true;
-                }
-            ImGui::EndCombo();
-        }
-        if (!r->isPontic()) {
-            int coping = r->params.coping ? 1 : 0;
-            ImGui::SetNextItemWidth(full);
-            if (ui::segmented("crowntype", {"Anatomic", "Coping"}, coping)) {
-                r->params.coping = coping == 1;
-                geometryChanged = true;
-            }
-        }
-        ImGui::Spacing();
-        if (ui::primaryButton(bridge ? "Auto design bridge" : "Auto design", ImVec2(full, 0), !busy && !app.readOnly())) {
-            pushUndo(*r);
-            startAutoDesign(app, r->tooth, distanceMap_);
-        }
-        ui::wrappedMutedText(bridge ? "Designs all units of the bridge: outer contacts, heights from the antagonist, connectors."
-                                    : "Fits the tooth between the neighbours, to the antagonist and adapts the contacts.");
-        ui::endCard();
-
-        if (bridge)
-            drawBridgeCard(app, *bridge, busy);
-
-        ImGui::Spacing();
-        ui::beginCard("##place");
-        ui::subheading("Shape and position");
-        auto slider = [&](const char* id, double& value, double fallback, float lo, float hi, const char* fmt) {
-            float v = static_cast<float>(value > 0 ? value : fallback);
-            ImGui::SetNextItemWidth(full);
-            if (ImGui::SliderFloat(id, &v, lo, hi, fmt)) {
-                value = v;
-                geometryChanged = true;
-            }
-            if (ImGui::IsItemActivated())
-                pushUndo(*r);
-        };
-        // Unset sizes show the library tooth's own dimensions.
-        const auto libShape = crown::toothShape(r->params.library, r->params.kind, r->params.upper);
-        slider("##h", r->params.crownHeight, libShape->height, 3.0f, 14.0f, "Height  %.2f mm");
-        slider("##hm", r->params.halfMesial, libShape->halfMesial, 2.0f, 8.0f, "Mesial  %.2f mm");
-        slider("##hd", r->params.halfDistal, libShape->halfDistal, 2.0f, 8.0f, "Distal  %.2f mm");
-        slider("##hb", r->params.halfBuccal, libShape->halfBuccal, 2.0f, 8.0f, "Buccal  %.2f mm");
-        slider("##hl", r->params.halfLingual, libShape->halfLingual, 2.0f, 8.0f, "Lingual  %.2f mm");
-        auto sliderSigned = [&](const char* id, double& value, float lo, float hi, const char* fmt) {
-            float v = static_cast<float>(value);
-            ImGui::SetNextItemWidth(full);
-            if (ImGui::SliderFloat(id, &v, lo, hi, fmt)) {
-                value = v;
-                geometryChanged = true;
-            }
-            if (ImGui::IsItemActivated())
-                pushUndo(*r);
-        };
-        sliderSigned("##rot", r->params.rotationDeg, -45.0f, 45.0f, "Rotation  %.1f deg");
-        sliderSigned("##cusp", r->params.cuspScale, 0.0f, 2.0f, "Cusp height  x%.2f");
-        const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-        if (ui::button("Flip mesial/distal", ImVec2(half, 0))) {
-            pushUndo(*r);
-            r->params.flipMesioDistal = !r->params.flipMesioDistal;
-            geometryChanged = true;
-        }
-        ImGui::SameLine();
-        if (ui::button("Flip buccal/lingual", ImVec2(half, 0))) {
-            pushUndo(*r);
-            r->params.flipBuccoLingual = !r->params.flipBuccoLingual;
-            geometryChanged = true;
-        }
-        if (r->isPontic()) {
-            float ridge = static_cast<float>(r->params.ridgeOffset);
-            ImGui::SetNextItemWidth(full);
-            if (ImGui::SliderFloat("##ridge", &ridge, -0.5f, 1.0f, "Ridge contact  %.2f mm")) {
-                r->params.ridgeOffset = ridge;
-                r->invalidateDie(); // the basal surface is re-projected onto the ridge
-                geometryChanged = true;
-            }
-            if (ImGui::IsItemActivated())
-                pushUndo(*r);
-            ui::mutedText("Negative values press into the tissue (ovate pontic).");
-        }
-        ui::endCard();
-
-        ImGui::Spacing();
-        ui::beginCard("##contacts");
-        ui::subheading("Contacts");
-        auto target = [&](const char* id, double& value, const char* fmt) {
-            float v = static_cast<float>(value);
-            ImGui::SetNextItemWidth(full);
-            if (ImGui::SliderFloat(id, &v, -0.2f, 0.4f, fmt))
-                value = v;
-        };
-        target("##pt", r->params.proximalTarget, "Proximal  %.2f mm");
-        target("##ot", r->params.occlusalTarget, "Occlusal  %.2f mm");
-        ui::mutedText("Negative values overlap (tight contact).");
-        if (ui::button("Adapt proximal", ImVec2(half, 0), !busy && r->contacts->neighbors != nullptr))
-            adapt(app, *r, true, false);
-        ImGui::SameLine();
-        if (ui::button("Adapt occlusal", ImVec2(half, 0), !busy && r->contacts->antagonist != nullptr))
-            adapt(app, *r, false, true);
-        if (ImGui::Checkbox("Show distance map", &distanceMap_))
-            updateCrownOverlay(app, *r, distanceMap_);
-        if (scanById(app, r->antagonistScanId)) {
-            bool vis = antagonistVisible(app);
-            if (ImGui::Checkbox("Show antagonist (transparent)", &vis))
-                setAntagonistVisible(app, vis, 0.45f);
-        }
-        if (distanceMap_) {
-            const auto legend = [&](glm::vec3 c, const char* t) {
-                ImGui::ColorButton(t, ImVec4(c.r, c.g, c.b, 1.0f), ImGuiColorEditFlags_NoTooltip, ImVec2(ImGui::GetFontSize(), ImGui::GetFontSize()));
-                ImGui::SameLine();
-                ui::mutedText("%s", t);
-            };
-            legend(contactColor(-0.1f), "< -0.05 mm");
-            ImGui::SameLine();
-            legend(contactColor(0.05f), "0 - 0.1");
-            ImGui::SameLine();
-            legend(contactColor(0.2f), "0.1 - 0.3");
-        }
-        ui::endCard();
-
-        ImGui::Spacing();
-        ui::beginCard("##freeform");
-        ui::subheading("Free-form");
-        ImGui::SetNextItemWidth(full);
-        if (ui::segmented("brush", {"Off", "Add", "Remove", "Smooth"}, brush_))
-            app.view3D(ViewId::Main3D).pickCursor = brush_ != 0;
-        ImGui::SetNextItemWidth(full);
-        ImGui::SliderFloat("##br", &brushRadius_, 0.5f, 5.0f, "Radius  %.1f mm");
-        ImGui::SetNextItemWidth(full);
-        ImGui::SliderFloat("##bs", &brushStrength_, 0.02f, 0.5f, "Strength  %.2f mm");
-        ui::mutedText(brush_ ? "Click on the crown to apply." : "Choose a tool, then click on the crown.");
-        ui::endCard();
-
-        ImGui::Spacing();
-        if (!r->isPontic() && ImGui::CollapsingHeader("Cement space and thickness")) {
-            auto mm = [&](const char* id, double& value, float lo, float hi, const char* fmt) {
-                float v = static_cast<float>(value);
-                ImGui::SetNextItemWidth(full);
-                if (ImGui::SliderFloat(id, &v, lo, hi, fmt)) {
-                    value = v;
-                    baseChanged = true;
-                }
-            };
-            mm("##cg", r->params.cementGap, 0.0f, 0.15f, "Cement gap  %.3f mm");
-            mm("##eg", r->params.extraGap, 0.0f, 0.15f, "Extra gap  %.3f mm");
-            mm("##dm", r->params.distanceToMargin, 0.0f, 2.0f, "Distance to margin  %.2f mm");
-            bool bo = r->params.blockOutUndercuts;
-            if (ImGui::Checkbox("Block out undercuts", &bo)) {
-                r->params.blockOutUndercuts = bo;
-                baseChanged = true;
-            }
-            float mt = static_cast<float>(r->params.minThickness);
-            ImGui::SetNextItemWidth(full);
-            if (ImGui::SliderFloat("##mt", &mt, 0.2f, 2.0f, "Min. thickness  %.2f mm")) {
-                r->params.minThickness = mt;
-                geometryChanged = true;
-            }
-            float mg = static_cast<float>(r->params.marginThickness);
-            ImGui::SetNextItemWidth(full);
-            if (ImGui::SliderFloat("##mg", &mg, 0.0f, 0.4f, "Margin thickness  %.2f mm")) {
-                r->params.marginThickness = mg;
-                geometryChanged = true;
-            }
-            if (r->params.coping) {
-                float ct = static_cast<float>(r->params.copingThickness);
-                ImGui::SetNextItemWidth(full);
-                if (ImGui::SliderFloat("##ct", &ct, 0.3f, 1.5f, "Coping thickness  %.2f mm")) {
-                    r->params.copingThickness = ct;
-                    geometryChanged = true;
-                }
-            }
-        }
-
-        ImGui::Spacing();
-        ui::beginCard("##result");
-        ui::subheading("Result");
-        if (r->crown) {
-            const auto& c = *r->crown;
-            if (c.watertight)
-                ImGui::TextColored(pal.success, "Closed, watertight");
-            else
-                ImGui::TextColored(pal.danger, "Not watertight");
-            ui::mutedText("Volume %.0f mm3, %zu triangles", c.volume, c.mesh.triangleCount());
-            ui::mutedText("Min. thickness %.2f mm%s", c.minThickness, c.thickenedVertices ? " (thickened)" : "");
-        } else {
-            ui::mutedText(busy ? "Designing..." : "Not designed yet");
-        }
-        if (ui::button("Undo", ImVec2(half, 0), !undo_.empty() && !busy)) {
-            r->params = undo_.back().first;
-            r->displacement = undo_.back().second;
-            undo_.pop_back();
-            r->invalidateBase();
-            regenerate(app, *r, distanceMap_);
-            app.markModified();
-        }
-        ImGui::SameLine();
-        if (ui::button("Reset free-form", ImVec2(half, 0), !r->displacement.empty() && !busy)) {
-            pushUndo(*r);
-            r->displacement.clear();
-            regenerate(app, *r, distanceMap_);
-            app.markModified();
-        }
-        ui::endCard();
-
-        if (baseChanged) {
-            r->base.reset();
-            r->crown.reset();
-        }
-        if ((geometryChanged || baseChanged) && !busy) {
-            if (r->params.kind != before.kind || r->params.coping != before.coping || r->params.library != before.library)
-                r->displacement.clear();
-            regenerate(app, *r, distanceMap_);
-            app.markModified();
+        switch (id()) {
+        case StepId::ToothPlacement: drawPlacement(app, *r); break;
+        case StepId::Freeforming: drawFreeforming(app, *r); break;
+        default: drawConnectors(app); break;
         }
     }
 
     void onViewEvent(DesignerApp& app, ViewId view, const ViewEvents& ev) override
     {
-        if (view != ViewId::Main3D)
+        if (view != ViewId::Main3D || id() != StepId::Connectors)
             return;
         View3D& v = app.view3D(ViewId::Main3D);
         // Dragging the selected connector with the gizmo.
@@ -2061,51 +2267,710 @@ public:
         gizmoWasUsing_ = v.gizmoDelta.has_value() || (gizmoWasUsing_ && ImGui::IsMouseDown(ImGuiMouseButton_Left));
         if (!ev.click || app.tasks().busy())
             return;
-        if (brush_ == 0) {
-            if (!pickConnector(app, *ev.click))
-                if (auto [b, i] = selected(app); b)
-                    selectConnector(app, *b, -1);
-            return;
-        }
-        RestorationDesign* r = app.doc().active();
-        if (!r || !r->crown || !r->base)
-            return;
-        ScanObject* s = scanById(app, r->prepScanId);
-        if (!s)
-            return;
-        auto hit = raycastMesh(r->crown->mesh, s->transform, *ev.click);
-        if (!hit)
-            return;
-        pushUndo(*r);
-        const glm::vec3 local(transformPoint(glm::inverse(s->transform), hit->point));
-        const crown::BrushMode mode = brush_ == 1 ? crown::BrushMode::Add : brush_ == 2 ? crown::BrushMode::Remove : crown::BrushMode::Smooth;
-        crown::applyBrush(*r->crown, r->displacement, local, brushRadius_, brushStrength_, mode);
-        regenerate(app, *r, distanceMap_);
-        app.markModified();
+        if (!pickConnector(app, *ev.click))
+            if (auto [b, i] = selected(app); b)
+                selectConnector(app, *b, -1);
     }
 
     OverlayFn overlay(DesignerApp& app, ViewId view) override
     {
         if (view != ViewId::Main3D)
             return {};
-        // The gizmo sits on the selected connector (set before the view draws).
         View3D& v = app.view3D(ViewId::Main3D);
-        v.gizmoPivot.reset();
-        if (auto [b, i] = selected(app); b && moveInView_ && brush_ == 0) {
-            RestorationDesign* first = findRestoration(app, b->teeth.front());
-            if (ScanObject* s = first ? scanById(app, first->prepScanId) : nullptr)
-                v.gizmoPivot = transformPoint(s->transform, b->connectors[static_cast<std::size_t>(i)].center);
-        }
-        if (brush_ == 0)
+        if (id() == StepId::Connectors) {
+            // The gizmo sits on the selected connector (set before the view draws).
+            v.gizmoPivot.reset();
+            if (auto [b, i] = selected(app); b && moveInView_) {
+                RestorationDesign* first = findRestoration(app, b->teeth.front());
+                if (ScanObject* s = first ? scanById(app, first->prepScanId) : nullptr)
+                    v.gizmoPivot = transformPoint(s->transform, b->connectors[static_cast<std::size_t>(i)].center);
+            }
             return {};
-        return [](ImDrawList* dl, const Projector& proj) {
-            const ImVec2 m = ImGui::GetIO().MousePos;
-            if (proj.contains(m))
-                dl->AddCircle(m, 14.0f * ImGui::GetStyle().FontScaleDpi, IM_COL32(255, 150, 40, 220), 32, 1.5f);
-        };
+        }
+        if (id() == StepId::ToothPlacement)
+            return [this, &app](ImDrawList* dl, const Projector& proj) { placementInteraction(app, dl, proj); };
+        return [this, &app](ImDrawList* dl, const Projector& proj) { brushInteraction(app, dl, proj); };
     }
 
 private:
+    // ---- Tooth placement ---------------------------------------------------
+
+    void drawPlacement(DesignerApp& app, RestorationDesign& r)
+    {
+        const ui::Palette& pal = ui::palette();
+        const bool busy = app.tasks().busy();
+        const float full = -FLT_MIN;
+        bool changed = false;
+        BridgeDesign* bridge = app.doc().bridgeOf(r.tooth);
+        crown::CrownParameters before = r.params;
+
+        ImGui::Spacing();
+        ui::beginCard("##tooth");
+        ui::subheading(r.isPontic() ? "Pontic" : "Tooth");
+        if (drawLibraryPicker(app, r))
+            changed = true;
+        int kind = static_cast<int>(r.params.kind);
+        ImGui::SetNextItemWidth(full);
+        if (ImGui::BeginCombo("##kind", crown::toothTemplate(r.params.kind, r.params.upper).name)) {
+            for (int k = 0; k <= static_cast<int>(crown::ToothKind::SecondMolar); ++k)
+                if (ImGui::Selectable(crown::toothTemplate(static_cast<crown::ToothKind>(k), r.params.upper).name, k == kind)) {
+                    pushUndo(r);
+                    r.params.kind = static_cast<crown::ToothKind>(k);
+                    changed = true;
+                }
+            ImGui::EndCombo();
+        }
+        if (!r.isPontic()) {
+            int coping = r.params.coping ? 1 : 0;
+            ImGui::SetNextItemWidth(full);
+            if (ui::segmented("crowntype", {"Anatomic", "Coping"}, coping)) {
+                r.params.coping = coping == 1;
+                changed = true;
+            }
+        }
+        ui::endCard();
+
+        ImGui::Spacing();
+        ui::beginCard("##place");
+        ui::subheading("Position");
+        ImGui::SetNextItemWidth(full);
+        ui::segmented("placemode", {"Move", "Rotate", "Scale"}, placeMode_);
+        ui::wrappedMutedText("Drag the tooth in the 3D view. Ctrl: rotate, Shift: scale, Ctrl+Shift: scale in the drag direction.");
+        if (bridge)
+            ImGui::Checkbox("Move all units together", &moveAll_);
+        if (ui::button(bridge ? "Auto position bridge" : "Auto position", ImVec2(full, 0), !busy && !app.readOnly())) {
+            pushUndo(r);
+            startAutoDesign(app, r.tooth, distanceMap_);
+        }
+        if (ImGui::CollapsingHeader("Fine adjustment")) {
+            auto slider = [&](const char* sid, double& value, double fallback, float lo, float hi, const char* fmt) {
+                float v = static_cast<float>(value > 0 ? value : fallback);
+                ImGui::SetNextItemWidth(full);
+                if (ImGui::SliderFloat(sid, &v, lo, hi, fmt)) {
+                    value = v;
+                    changed = true;
+                }
+                if (ImGui::IsItemActivated())
+                    pushUndo(r);
+            };
+            auto signedSlider = [&](const char* sid, double& value, float lo, float hi, const char* fmt) {
+                float v = static_cast<float>(value);
+                ImGui::SetNextItemWidth(full);
+                if (ImGui::SliderFloat(sid, &v, lo, hi, fmt)) {
+                    value = v;
+                    changed = true;
+                }
+                if (ImGui::IsItemActivated())
+                    pushUndo(r);
+            };
+            const auto libShape = crown::toothShape(r.params.library, r.params.kind, r.params.upper);
+            slider("##h", r.params.crownHeight, libShape->height, 3.0f, 14.0f, "Height  %.2f mm");
+            slider("##hm", r.params.halfMesial, libShape->halfMesial, 2.0f, 8.0f, "Mesial  %.2f mm");
+            slider("##hd", r.params.halfDistal, libShape->halfDistal, 2.0f, 8.0f, "Distal  %.2f mm");
+            slider("##hb", r.params.halfBuccal, libShape->halfBuccal, 2.0f, 8.0f, "Buccal  %.2f mm");
+            slider("##hl", r.params.halfLingual, libShape->halfLingual, 2.0f, 8.0f, "Lingual  %.2f mm");
+            signedSlider("##rot", r.params.rotationDeg, -45.0f, 45.0f, "Rotation  %.1f\xC2\xB0");
+            signedSlider("##tm", r.params.tiltMesialDeg, -25.0f, 25.0f, "Tilt mesial  %.1f\xC2\xB0");
+            signedSlider("##tb", r.params.tiltBuccalDeg, -25.0f, 25.0f, "Tilt buccal  %.1f\xC2\xB0");
+            signedSlider("##sm", r.params.shiftMesial, -3.0f, 3.0f, "Shift mesial  %+.2f mm");
+            signedSlider("##sb", r.params.shiftBuccal, -3.0f, 3.0f, "Shift buccal  %+.2f mm");
+            signedSlider("##so", r.params.shiftOcclusal, -4.0f, 4.0f, "Shift occlusal  %+.2f mm");
+            signedSlider("##cusp", r.params.cuspScale, 0.0f, 2.0f, "Cusp height  x%.2f");
+            const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+            if (ui::button("Flip mesial/distal", ImVec2(half, 0))) {
+                pushUndo(r);
+                r.params.flipMesioDistal = !r.params.flipMesioDistal;
+                changed = true;
+            }
+            ImGui::SameLine();
+            if (ui::button("Flip buccal/lingual", ImVec2(half, 0))) {
+                pushUndo(r);
+                r.params.flipBuccoLingual = !r.params.flipBuccoLingual;
+                changed = true;
+            }
+            if (r.isPontic()) {
+                float ridge = static_cast<float>(r.params.ridgeOffset);
+                ImGui::SetNextItemWidth(full);
+                if (ImGui::SliderFloat("##ridge", &ridge, -0.5f, 1.0f, "Ridge contact  %.2f mm")) {
+                    r.params.ridgeOffset = ridge;
+                    r.invalidateDie(); // the basal surface is re-projected onto the ridge
+                    changed = true;
+                }
+                ui::mutedText("Negative values press into the tissue (ovate pontic).");
+            }
+        }
+        ui::endCard();
+
+        ImGui::Spacing();
+        ui::beginCard("##adapt");
+        ui::subheading("Adapt to margin");
+        if (r.adapted) {
+            ImGui::TextColored(pal.success, "Attached to the %s", r.isPontic() ? "ridge" : "margin");
+            ui::wrappedMutedText("Changing the position re-adapts the shell and keeps the free-forming.");
+            if (ui::button("Detach (place freely again)", ImVec2(full, 0), !busy)) {
+                pushUndo(r);
+                std::vector<int> teeth = {r.tooth};
+                if (bridge)
+                    teeth = bridge->teeth;
+                for (int t : teeth)
+                    if (RestorationDesign* u = findRestoration(app, t)) {
+                        u->adapted = false;
+                        regenerate(app, *u, distanceMap_);
+                    }
+                app.markModified();
+            }
+        } else {
+            ui::wrappedMutedText("When the tooth sits right, attach it to the margin. It becomes a thin shell for free-forming; the "
+                                 "crown bottom adds the thickness when merging.");
+            if (ui::primaryButton(bridge ? "Adapt bridge to margins" : "Adapt to margin", ImVec2(full, 0), !busy && r.placed)) {
+                pushUndo(r);
+                adaptToMargin(app, r.tooth, distanceMap_);
+            }
+        }
+        ui::endCard();
+        if (scanById(app, r.antagonistScanId)) {
+            ImGui::Spacing();
+            bool vis = antagonistVisible(app);
+            if (ImGui::Checkbox("Show antagonist (transparent)", &vis))
+                setAntagonistVisible(app, vis, 0.45f);
+        }
+        drawUndo(app, r);
+        if (changed && !busy) {
+            if (r.params.kind != before.kind || r.params.coping != before.coping || r.params.library != before.library)
+                r.displacement.clear();
+            r.placed = true;
+            regenerate(app, r, distanceMap_);
+            app.markModified();
+        }
+    }
+
+    // The restorations moved by a drag: the hovered one, or its whole bridge with "move all".
+    std::vector<RestorationDesign*> dragTargets(DesignerApp& app, int tooth)
+    {
+        std::vector<RestorationDesign*> out;
+        BridgeDesign* b = app.doc().bridgeOf(tooth);
+        if (b && moveAll_) {
+            for (int t : b->teeth)
+                if (RestorationDesign* u = findRestoration(app, t))
+                    out.push_back(u);
+        } else if (RestorationDesign* u = findRestoration(app, tooth)) {
+            out.push_back(u);
+        }
+        return out;
+    }
+
+    const Mesh* displayedMesh(const RestorationDesign& r) const
+    {
+        if (r.adapted && r.crown)
+            return &r.crown->mesh;
+        if (r.placed && r.libraryTooth)
+            return r.libraryTooth.get();
+        return nullptr;
+    }
+
+    // Move (drag), rotate (Ctrl), scale (Shift) or scale in the drag direction (Ctrl+Shift) the tooth.
+    void placementInteraction(DesignerApp& app, ImDrawList* dl, const Projector& proj)
+    {
+        View3D& view = app.view3D(ViewId::Main3D);
+        const ImGuiIO& io = ImGui::GetIO();
+        const ImVec2 mouse = io.MousePos;
+        const bool inView = proj.contains(mouse) && ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        if (dragging_) {
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || app.tasks().busy()) {
+                dragging_ = false;
+                view.blockOrbit = false;
+                for (int t : dragTeeth_)
+                    if (RestorationDesign* u = findRestoration(app, t))
+                        updateCrownOverlay(app, *u, distanceMap_);
+                app.markModified();
+                return;
+            }
+            const ImVec2 d(mouse.x - lastMouse_.x, mouse.y - lastMouse_.y);
+            lastMouse_ = mouse;
+            if (d.x != 0.0f || d.y != 0.0f)
+                for (int t : dragTeeth_)
+                    if (RestorationDesign* u = findRestoration(app, t))
+                        applyDrag(app, *u, d, proj, io.KeyCtrl, io.KeyShift);
+            return;
+        }
+        if (!inView || app.tasks().busy())
+            return;
+        auto ray = proj.rayAt(mouse);
+        if (!ray)
+            return;
+        // The tooth under the mouse.
+        int hovered = 0;
+        double best = 1e30;
+        for (const auto& r : app.doc().restorations) {
+            const Mesh* m = displayedMesh(r);
+            ScanObject* s = m ? scanById(app, r.prepScanId) : nullptr;
+            if (!s)
+                continue;
+            if (auto hit = raycastMesh(*m, s->transform, *ray); hit && hit->distance < best) {
+                best = hit->distance;
+                hovered = r.tooth;
+            }
+        }
+        if (!hovered)
+            return;
+        const bool ctrl = io.KeyCtrl, shift = io.KeyShift;
+        const int mode = ctrl && shift ? 3 : ctrl ? 1 : shift ? 2 : placeMode_;
+        ImGui::SetMouseCursor(mode == 0 ? ImGuiMouseCursor_ResizeAll : mode == 1 ? ImGuiMouseCursor_Hand : ImGuiMouseCursor_ResizeNWSE);
+        const char* what[] = {"Drag to move", "Drag to rotate (sideways) and tilt (up/down)", "Drag up/down to scale", "Drag to scale in that direction"};
+        const float sc = ImGui::GetStyle().FontScaleDpi;
+        dl->AddText(ImVec2(mouse.x + 16 * sc, mouse.y + 8 * sc), IM_COL32(240, 242, 245, 230), what[mode]);
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            dragging_ = true;
+            view.blockOrbit = true;
+            lastMouse_ = mouse;
+            dragTeeth_.clear();
+            for (RestorationDesign* u : dragTargets(app, hovered)) {
+                pushUndo(*u);
+                dragTeeth_.push_back(u->tooth);
+            }
+            if (RestorationDesign* u = findRestoration(app, hovered))
+                app.doc().activeRestoration = static_cast<int>(u - app.doc().restorations.data());
+        }
+    }
+
+    void applyDrag(DesignerApp& app, RestorationDesign& r, const ImVec2& d, const Projector& proj, bool ctrl, bool shift)
+    {
+        ScanObject* s = scanById(app, r.prepScanId);
+        if (!s || !r.base)
+            return;
+        crown::CrownParameters& p = r.params;
+        const gfx::Camera& cam = app.view3D(ViewId::Main3D).camera;
+        const double wpp = cam.worldPerPixel(proj.max.y - proj.min.y);
+        const glm::dmat4 inv = glm::inverse(s->transform);
+        const glm::dvec3 right = glm::normalize(transformVector(inv, cam.right())), up = glm::normalize(transformVector(inv, cam.up()));
+        crown::CrownParameters flat = p;
+        flat.tiltMesialDeg = flat.tiltBuccalDeg = 0.0;
+        const crown::CrownAxes ax = crown::crownAxes(r.base->frame, flat);
+        const int mode = ctrl && shift ? 3 : ctrl ? 1 : shift ? 2 : placeMode_;
+        const auto shape = crown::toothShape(p.library, p.kind, p.upper);
+        auto materialise = [&] {
+            if (p.crownHeight <= 0)
+                p.crownHeight = shape->height;
+            if (p.halfMesial <= 0)
+                p.halfMesial = shape->halfMesial;
+            if (p.halfDistal <= 0)
+                p.halfDistal = shape->halfDistal;
+            if (p.halfBuccal <= 0)
+                p.halfBuccal = shape->halfBuccal;
+            if (p.halfLingual <= 0)
+                p.halfLingual = shape->halfLingual;
+        };
+        if (mode == 0) {
+            const glm::dvec3 move = (right * static_cast<double>(d.x) - up * static_cast<double>(d.y)) * wpp;
+            p.shiftMesial += glm::dot(move, ax.M);
+            p.shiftBuccal += glm::dot(move, ax.B);
+            p.shiftOcclusal += glm::dot(move, ax.A);
+        } else if (mode == 1) {
+            p.rotationDeg = std::clamp(p.rotationDeg + d.x * 0.4, -90.0, 90.0);
+            // Up/down tilts the tooth axis towards the viewer's up direction.
+            glm::dvec3 tiltDir = up - ax.A * glm::dot(up, ax.A);
+            if (glm::length(tiltDir) > 1e-6) {
+                tiltDir = glm::normalize(tiltDir);
+                const double deg = -d.y * 0.25;
+                p.tiltMesialDeg = std::clamp(p.tiltMesialDeg + deg * glm::dot(tiltDir, ax.M), -30.0, 30.0);
+                p.tiltBuccalDeg = std::clamp(p.tiltBuccalDeg + deg * glm::dot(tiltDir, ax.B), -30.0, 30.0);
+            }
+        } else if (mode == 2) {
+            materialise();
+            const double f = std::exp(-d.y * 0.004);
+            p.crownHeight *= f;
+            p.halfMesial *= f;
+            p.halfDistal *= f;
+            p.halfBuccal *= f;
+            p.halfLingual *= f;
+        } else {
+            materialise();
+            const glm::dvec3 dir = right * static_cast<double>(d.x) - up * static_cast<double>(d.y);
+            const double len = glm::length(dir);
+            if (len < 1e-9)
+                return;
+            // Dragging away from the tooth centre enlarges it along the drag direction.
+            const glm::dvec3 u = dir / len;
+            const double sign = d.x - d.y >= 0.0f ? 1.0 : -1.0; // right / up enlarges
+            const double f = std::exp(sign * len * 0.004);
+            const double wm = std::abs(glm::dot(u, ax.M)), wb = std::abs(glm::dot(u, ax.B)), wa = std::abs(glm::dot(u, ax.A));
+            p.halfMesial *= std::pow(f, wm);
+            p.halfDistal *= std::pow(f, wm);
+            p.halfBuccal *= std::pow(f, wb);
+            p.halfLingual *= std::pow(f, wb);
+            p.crownHeight *= std::pow(f, wa);
+        }
+        p.crownHeight = std::clamp(p.crownHeight, 2.0, 16.0);
+        for (double* h : {&p.halfMesial, &p.halfDistal, &p.halfBuccal, &p.halfLingual})
+            if (*h > 0)
+                *h = std::clamp(*h, 1.5, 9.0);
+        r.placed = true;
+        regenerate(app, r, false);
+    }
+
+    // ---- Free-forming --------------------------------------------------------
+
+    void loadCustomTools()
+    {
+        tools_ = crown::builtinBrushTools();
+        builtinCount_ = tools_.size();
+        for (auto& t : crown::loadBrushTools(brushFolder()))
+            tools_.push_back(std::move(t));
+        if (tool_ >= static_cast<int>(tools_.size()))
+            tool_ = 0;
+    }
+
+    void drawFreeforming(DesignerApp& app, RestorationDesign& r)
+    {
+        const ui::Palette& pal = ui::palette();
+        const bool busy = app.tasks().busy();
+        const float full = -FLT_MIN;
+        if (!r.adapted || !r.crown) {
+            ImGui::Spacing();
+            ui::wrappedMutedText("Adapt the tooth to the margin first (tooth placement).");
+            return;
+        }
+        ImGui::Spacing();
+        ui::beginCard("##knife");
+        ui::subheading("Wax knife");
+        int mode = brushOn_ ? brushMode_ + 1 : 0;
+        ImGui::SetNextItemWidth(full);
+        if (ui::segmented("brush", {"Off", "Add / Remove", "Smooth / Flatten"}, mode)) {
+            brushOn_ = mode != 0;
+            if (brushOn_)
+                brushMode_ = mode - 1;
+            app.view3D(ViewId::Main3D).pickCursor = brushOn_;
+        }
+        ui::mutedText(brushMode_ == 0 ? "Hold to add, Shift: remove, Ctrl+Shift: smooth." : "Hold to smooth, Shift: flatten.");
+        ImGui::SetNextItemWidth(full);
+        if (ImGui::BeginCombo("##tool", tools_[static_cast<std::size_t>(tool_)].name.c_str())) {
+            for (std::size_t i = 0; i < tools_.size(); ++i) {
+                if (i == builtinCount_)
+                    ImGui::Separator();
+                if (ImGui::Selectable(std::format("{}##t{}", tools_[i].name, i).c_str(), static_cast<int>(i) == tool_))
+                    tool_ = static_cast<int>(i);
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SetNextItemWidth(full);
+        ImGui::SliderFloat("##br", &brushRadius_, 0.3f, 5.0f, "Size  %.1f mm");
+        ImGui::SetNextItemWidth(full);
+        ImGui::SliderFloat("##bs", &brushStrength_, 0.02f, 1.0f, "Strength  %.2f mm/s");
+        crown::BrushTool& tool = tools_[static_cast<std::size_t>(tool_)];
+        if (tool.kind == crown::BrushKind::Texture) {
+            float ts = static_cast<float>(tool.textureScale), tc = static_cast<float>(tool.textureContrast);
+            ImGui::SetNextItemWidth(full);
+            if (ImGui::SliderFloat("##tsc", &ts, 0.05f, 1.5f, "Texture size  %.2f mm"))
+                tool.textureScale = ts;
+            ImGui::SetNextItemWidth(full);
+            if (ImGui::SliderFloat("##tct", &tc, 0.2f, 3.0f, "Texture contrast  %.1f"))
+                tool.textureContrast = tc;
+        }
+        if (ImGui::CollapsingHeader("Custom tools"))
+            drawToolEditor();
+        ui::endCard();
+
+        ImGui::Spacing();
+        ui::beginCard("##adaptcontacts");
+        ui::subheading("Adapt");
+        auto target = [&](const char* sid, double& value, const char* fmt) {
+            float v = static_cast<float>(value);
+            ImGui::SetNextItemWidth(full);
+            if (ImGui::SliderFloat(sid, &v, -0.2f, 0.4f, fmt))
+                value = v;
+        };
+        target("##ot", r.params.occlusalTarget, "Occlusal distance  %.2f mm");
+        target("##pt", r.params.proximalTarget, "Approximal distance  %.2f mm");
+        ui::mutedText("Negative values overlap (tight contact).");
+        const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        if (ui::button("Occlusion", ImVec2(half, 0), !busy && r.contacts->antagonist != nullptr))
+            adapt(app, r, false, true, 0.6);
+        ImGui::SameLine();
+        if (ui::button("Approximal", ImVec2(half, 0), !busy && r.contacts->neighbors != nullptr))
+            adapt(app, r, true, false, 0.6);
+        if (ui::button("Cut all intersections", ImVec2(full, 0), !busy))
+            adapt(app, r, true, r.contacts->antagonist != nullptr, 0.0);
+        if (ImGui::Checkbox("Show distance map", &distanceMap_))
+            updateCrownOverlay(app, r, distanceMap_);
+        if (scanById(app, r.antagonistScanId)) {
+            bool vis = antagonistVisible(app);
+            if (ImGui::Checkbox("Show antagonist (transparent)", &vis))
+                setAntagonistVisible(app, vis, 0.45f);
+        }
+        if (distanceMap_) {
+            const auto legend = [&](glm::vec3 c, const char* t) {
+                ImGui::ColorButton(t, ImVec4(c.r, c.g, c.b, 1.0f), ImGuiColorEditFlags_NoTooltip, ImVec2(ImGui::GetFontSize(), ImGui::GetFontSize()));
+                ImGui::SameLine();
+                ui::mutedText("%s", t);
+            };
+            legend(contactColor(-0.1f), "< -0.05 mm");
+            ImGui::SameLine();
+            legend(contactColor(0.05f), "0 - 0.1");
+            ImGui::SameLine();
+            legend(contactColor(0.2f), "0.1 - 0.3");
+        }
+        ui::endCard();
+        (void)pal;
+        drawUndo(app, r);
+    }
+
+    // Custom tool editor: the cross-section of the tool (drag points, double-click adds one,
+    // right-click removes one), the falloff, and saving / importing / exporting tools.
+    void drawToolEditor()
+    {
+        crown::BrushTool& t = editTool_;
+        const float s = ImGui::GetFontSize();
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputTextWithHint("##tname", "Tool name", &t.name);
+        // Profile canvas: x = distance from the tool centre (0..1), y = material (0..1).
+        const ImVec2 size(ImGui::GetContentRegionAvail().x, s * 7.0f);
+        const ImVec2 o = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##profile", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+        const bool hovered = ImGui::IsItemHovered();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ui::Palette& pal = ui::palette();
+        const float pad = s * 0.5f;
+        auto toScreen = [&](double x, double y) { return ImVec2(o.x + pad + static_cast<float>(x) * (size.x - 2 * pad), o.y + size.y - pad - static_cast<float>(y) * (size.y - 2 * pad)); };
+        auto fromScreen = [&](ImVec2 p) {
+            return glm::dvec2(std::clamp((p.x - o.x - pad) / (size.x - 2 * pad), 0.0f, 1.0f), std::clamp((o.y + size.y - pad - p.y) / (size.y - 2 * pad), 0.0f, 1.0f));
+        };
+        dl->AddRectFilled(o, ImVec2(o.x + size.x, o.y + size.y), ImGui::GetColorU32(pal.surfaceAlt), 4.0f);
+        // Effective tool (profile x falloff) as a filled curve, and the editable profile on top.
+        for (int i = 0; i < 60; ++i) {
+            const double x0 = i / 60.0, x1 = (i + 1) / 60.0;
+            const ImVec2 a = toScreen(x0, t.weight(x0, glm::vec3(0))), b = toScreen(x1, t.weight(x1, glm::vec3(0)));
+            dl->AddQuadFilled(toScreen(x0, 0), a, b, toScreen(x1, 0), IM_COL32(120, 160, 230, 90));
+        }
+        for (std::size_t i = 1; i < t.profile.size(); ++i)
+            dl->AddLine(toScreen(t.profile[i - 1].x, t.profile[i - 1].y), toScreen(t.profile[i].x, t.profile[i].y), ImGui::GetColorU32(pal.accent), 2.0f);
+        const ImVec2 fs = toScreen(t.falloffStart, 0.0);
+        dl->AddLine(ImVec2(fs.x, o.y + pad), ImVec2(fs.x, o.y + size.y - pad), IM_COL32(230, 160, 60, 160), 1.0f);
+        int hoverPt = -1;
+        for (std::size_t i = 0; i < t.profile.size(); ++i) {
+            const ImVec2 q = toScreen(t.profile[i].x, t.profile[i].y);
+            const bool h = hovered && std::hypot(q.x - ImGui::GetIO().MousePos.x, q.y - ImGui::GetIO().MousePos.y) < s * 0.5f;
+            if (h)
+                hoverPt = static_cast<int>(i);
+            dl->AddCircleFilled(q, s * (h || static_cast<int>(i) == dragPt_ ? 0.32f : 0.24f), ImGui::GetColorU32(pal.accent));
+        }
+        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            dragPt_ = hoverPt;
+        if (dragPt_ >= 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            glm::dvec2 q = fromScreen(ImGui::GetIO().MousePos);
+            const auto i = static_cast<std::size_t>(dragPt_);
+            if (i == 0)
+                q.x = 0.0; // the centre stays at the centre
+            if (i > 0)
+                q.x = std::max(q.x, t.profile[i - 1].x + 0.01);
+            if (i + 1 < t.profile.size())
+                q.x = std::min(q.x, t.profile[i + 1].x - 0.01);
+            t.profile[i] = q;
+        } else {
+            dragPt_ = -1;
+        }
+        if (hovered && hoverPt < 0 && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            const glm::dvec2 q = fromScreen(ImGui::GetIO().MousePos);
+            t.profile.push_back(q);
+            std::sort(t.profile.begin(), t.profile.end(), [](const glm::dvec2& a, const glm::dvec2& b) { return a.x < b.x; });
+        }
+        if (hovered && hoverPt > 0 && t.profile.size() > 2 && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+            t.profile.erase(t.profile.begin() + hoverPt);
+        ui::mutedText("Drag points; double-click adds, right-click removes.");
+        float f0 = static_cast<float>(t.falloffStart), fp = static_cast<float>(t.falloffPower);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::SliderFloat("##f0", &f0, 0.0f, 1.0f, "Falloff starts at  %.2f"))
+            t.falloffStart = f0;
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::SliderFloat("##fp", &fp, 0.2f, 4.0f, "Falloff curve  %.2f"))
+            t.falloffPower = fp;
+        t.kind = crown::BrushKind::Custom;
+        const float third = (ImGui::GetContentRegionAvail().x - 2 * ImGui::GetStyle().ItemSpacing.x) / 3.0f;
+        if (ui::button("Save tool", ImVec2(third, 0), !t.name.empty())) {
+            try {
+                crown::saveBrushTool(brushFolder() / (brushSlug(t.name) + ".json"), t);
+                loadCustomTools();
+                for (std::size_t i = 0; i < tools_.size(); ++i)
+                    if (tools_[i].name == t.name && i >= builtinCount_)
+                        tool_ = static_cast<int>(i);
+                ui::toast(ui::ToastKind::Success, "Tool \"" + t.name + "\" saved.");
+            } catch (const std::exception& e) {
+                ui::showError("Save tool", e.what());
+            }
+        }
+        ImGui::SameLine();
+        if (ui::button("Import...", ImVec2(third, 0)))
+            if (auto f = ui::dialogs::openFile({{"OcclusaCAD tools", "json"}})) {
+                try {
+                    const crown::BrushTool in = crown::loadBrushTool(*f);
+                    crown::saveBrushTool(brushFolder() / (brushSlug(in.name) + ".json"), in);
+                    loadCustomTools();
+                    editTool_ = in;
+                    ui::toast(ui::ToastKind::Success, "Tool \"" + in.name + "\" imported.");
+                } catch (const std::exception& e) {
+                    ui::showError("Import tool", e.what());
+                }
+            }
+        ImGui::SameLine();
+        if (ui::button("Export...", ImVec2(third, 0), !t.name.empty()))
+            if (auto f = ui::dialogs::saveFile({{"OcclusaCAD tools", "json"}}, brushSlug(t.name) + ".json")) {
+                try {
+                    crown::saveBrushTool(*f, t);
+                } catch (const std::exception& e) {
+                    ui::showError("Export tool", e.what());
+                }
+            }
+        if (tool_ >= static_cast<int>(builtinCount_) && ui::button("Edit selected tool", ImVec2(-FLT_MIN, 0)))
+            editTool_ = tools_[static_cast<std::size_t>(tool_)];
+    }
+
+    // Hold-to-sculpt: while the mouse is held over the crown, the tool works continuously.
+    void brushInteraction(DesignerApp& app, ImDrawList* dl, const Projector& proj)
+    {
+        View3D& view = app.view3D(ViewId::Main3D);
+        const ImGuiIO& io = ImGui::GetIO();
+        const ImVec2 mouse = io.MousePos;
+        RestorationDesign* r = app.doc().active();
+        if (!brushOn_ || !r || !r->adapted || !r->crown || app.tasks().busy()) {
+            if (painting_)
+                endStroke(app);
+            return;
+        }
+        const bool inView = proj.contains(mouse) && ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        const float sc = ImGui::GetStyle().FontScaleDpi;
+        ScanObject* s = scanById(app, r->prepScanId);
+        if (!s)
+            return;
+        std::optional<glm::vec3> local;
+        if (auto ray = proj.rayAt(mouse))
+            if (auto hit = raycastMesh(r->crown->mesh, s->transform, *ray))
+                local = glm::vec3(transformPoint(glm::inverse(s->transform), hit->point));
+        if (local && inView) {
+            // Brush outline: a circle of the brush size around the surface point.
+            const glm::dvec3 w = transformPoint(s->transform, glm::dvec3(*local));
+            if (auto c = proj(w)) {
+                const glm::dvec3 rightW = app.view3D(ViewId::Main3D).camera.right();
+                if (auto e = proj(w + rightW * static_cast<double>(brushRadius_)))
+                    dl->AddCircle(*c, std::hypot(e->x - c->x, e->y - c->y), IM_COL32(255, 150, 40, 220), 40, 1.5f * sc);
+            }
+        }
+        if (!painting_ && inView && local && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            painting_ = true;
+            view.blockOrbit = true;
+            pushUndo(*r);
+        }
+        if (painting_) {
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                endStroke(app);
+                return;
+            }
+            if (!local)
+                return;
+            crown::BrushMode mode;
+            if (brushMode_ == 0)
+                mode = io.KeyCtrl && io.KeyShift ? crown::BrushMode::Smooth : io.KeyShift ? crown::BrushMode::Remove : crown::BrushMode::Add;
+            else
+                mode = io.KeyShift ? crown::BrushMode::Flatten : crown::BrushMode::Smooth;
+            const float dt = std::clamp(io.DeltaTime, 0.004f, 0.05f);
+            const float amount = mode == crown::BrushMode::Smooth || mode == crown::BrushMode::Flatten ? brushStrength_ * 0.5f : brushStrength_ * dt;
+            crown::applyBrushTool(*r->crown, r->displacement, *local, brushRadius_, amount, mode, tools_[static_cast<std::size_t>(tool_)]);
+            regenerateStroke(app, *r);
+        }
+    }
+
+    // During a stroke only the shell is rebuilt (no distance map, no bridge update).
+    void regenerateStroke(DesignerApp& app, RestorationDesign& r)
+    {
+        r.crown = std::make_shared<crown::CrownMesh>(crown::buildCrown(*r.base, r.effectiveParams(), r.displacement, true));
+        r.merged.reset();
+        updateCrownOverlay(app, r, false);
+    }
+
+    void endStroke(DesignerApp& app)
+    {
+        painting_ = false;
+        app.view3D(ViewId::Main3D).blockOrbit = false;
+        if (RestorationDesign* r = app.doc().active()) {
+            regenerate(app, *r, distanceMap_);
+            app.markModified();
+        }
+    }
+
+    void adapt(DesignerApp& app, RestorationDesign& r, bool proximal, bool occlusal, double reach)
+    {
+        if (!ensureBase(app, r))
+            return;
+        pushUndo(r);
+        auto base = r.base;
+        auto contacts = r.contacts;
+        const crown::CrownParameters p = r.effectiveParams();
+        std::vector<float> disp = r.displacement;
+        const int tooth = r.tooth;
+        const bool map = distanceMap_;
+        app.tasks().start("Adapting", [&app, base, contacts, p, disp, tooth, proximal, occlusal, reach, map](const ProgressFn& progress) mutable
+                          -> ui::TaskRunner::Continuation {
+            reportProgress(progress, 0.2f, "Adapting the crown surface");
+            crown::adaptContacts(*base, p, *contacts, disp, proximal, occlusal, reach, true);
+            return [&app, disp, tooth, map] {
+                if (RestorationDesign* r = findRestoration(app, tooth)) {
+                    r->displacement = disp;
+                    regenerate(app, *r, map);
+                    app.markModified();
+                }
+            };
+        });
+    }
+
+    // ---- Connectors ----------------------------------------------------------
+
+    void drawConnectors(DesignerApp& app)
+    {
+        const bool busy = app.tasks().busy();
+        if (app.doc().bridges.empty()) {
+            ImGui::Spacing();
+            ui::wrappedMutedText("This case has no bridges: there are no connectors to set. Continue to merge.");
+            return;
+        }
+        for (auto& b : app.doc().bridges) {
+            if (b.connectors.empty())
+                bridgeChanged(app, b);
+            if (b.connectors.empty()) {
+                ImGui::Spacing();
+                ui::wrappedMutedText(std::format("Bridge {}: adapt all units to the margins first.", bridgeName(app, b)).c_str());
+                continue;
+            }
+            drawBridgeCard(app, b, busy);
+        }
+    }
+
+    // ---- Shared ----------------------------------------------------------------
+
+    void drawUndo(DesignerApp& app, RestorationDesign& r)
+    {
+        const bool busy = app.tasks().busy();
+        ImGui::Spacing();
+        const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        if (ui::button("Undo", ImVec2(half, 0), !undo_.empty() && !busy)) {
+            const auto& u = undo_.back();
+            if (RestorationDesign* t = findRestoration(app, u.tooth)) {
+                t->params = u.params;
+                t->displacement = u.displacement;
+                t->placed = u.placed;
+                t->adapted = u.adapted;
+                t->invalidateShape();
+                regenerate(app, *t, distanceMap_);
+            }
+            undo_.pop_back();
+            app.markModified();
+        }
+        ImGui::SameLine();
+        if (ui::button("Reset free-forming", ImVec2(half, 0), !r.displacement.empty() && !busy)) {
+            pushUndo(r);
+            r.displacement.clear();
+            regenerate(app, r, distanceMap_);
+            app.markModified();
+        }
+    }
+
     // Tooth library choice and import. Returns true when the library changed.
     bool drawLibraryPicker(DesignerApp& app, RestorationDesign& r)
     {
@@ -2224,25 +3089,6 @@ private:
                 ImGui::PopStyleColor();
             }
         drawConnectorEditor(app, b);
-        ImGui::Spacing();
-        if (b.result) {
-            if (b.result->ok) {
-                ImGui::TextColored(b.result->watertight ? pal.success : pal.danger, b.result->watertight ? "Merged, watertight" : "Merged, NOT watertight");
-                ui::mutedText("Volume %.0f mm3, %zu triangles", b.result->volume, b.result->mesh.triangleCount());
-                for (std::size_t i = 0; i < b.result->connectorAreas.size() && i + 1 < b.teeth.size(); ++i) {
-                    const double a = b.result->connectorAreas[i];
-                    ImGui::TextColored(a + 1e-3 >= b.connectorArea ? pal.success : pal.warning, "%s-%s", app.toothText(b.teeth[i]).c_str(), app.toothText(b.teeth[i + 1]).c_str());
-                    ImGui::SameLine();
-                    ui::mutedText("connector %.1f mm2", a);
-                }
-            } else {
-                ImGui::TextColored(pal.danger, "Merge failed: %s", b.result->error.c_str());
-            }
-        } else {
-            ui::mutedText("Not merged yet (merged automatically when saving).");
-        }
-        if (ui::button("Merge bridge", ImVec2(full, 0), !busy && !b.connectors.empty() && !b.result))
-            startBridgeMerge(app, b);
         ui::endCard();
     }
 
@@ -2383,27 +3229,31 @@ private:
         return true;
     }
 
-    // Runs once the data and the scan analysis are available: designs new crowns automatically.
+    // Runs once the data and the scan analysis are available: positions new teeth automatically
+    // (tooth placement) and rebuilds saved designs.
     void prepare(DesignerApp& app)
     {
         if (app.loading() || restorationsPending(app))
             return;
         RestorationDesign* active = app.doc().active();
-        if (!active || !active->supported() || !ensureBase(app, *active))
+        if (!active || !active->supported() || !ensureBase(app, *active)) {
+            if (id() == StepId::Connectors && (!active || !active->supported()))
+                ready_ = true;
             return;
+        }
         std::set<std::string> bridgesQueued;
         for (auto& r : app.doc().restorations) {
             if (!r.supported() || !ensureBase(app, r))
                 continue;
             BridgeDesign* b = app.doc().bridgeOf(r.tooth);
-            if (!r.crownGenerated) {
-                // One design task per bridge or single crown, run one after another.
+            if (!r.placed && id() == StepId::ToothPlacement) {
+                // One positioning task per bridge or single tooth, run one after another.
                 if (b && !bridgesQueued.insert(b->label()).second)
                     continue;
                 const int tooth = r.tooth;
                 const bool map = distanceMap_;
                 app.enqueue([&app, tooth, map] { startAutoDesign(app, tooth, map); });
-            } else if (!r.crown) {
+            } else if ((r.adapted && !r.crown) || (!r.adapted && r.placed && !r.libraryTooth)) {
                 regenerate(app, r, distanceMap_);
             } else {
                 updateCrownOverlay(app, r, distanceMap_);
@@ -2412,53 +3262,227 @@ private:
         for (auto& b : app.doc().bridges)
             if (b.connectors.empty())
                 bridgeChanged(app, b);
-        setAntagonistVisible(app, false);
+        setAntagonistVisible(app, id() == StepId::ToothPlacement);
         viewOcclusal(app, *active, 35.0);
         ready_ = true;
     }
 
-    bool ready_ = false;
+    struct UndoEntry {
+        int tooth = 0;
+        crown::CrownParameters params;
+        std::vector<float> displacement;
+        bool placed = false, adapted = false;
+    };
 
     void pushUndo(const RestorationDesign& r)
     {
-        undo_.emplace_back(r.params, r.displacement);
-        if (undo_.size() > 30)
+        undo_.push_back({r.tooth, r.params, r.displacement, r.placed, r.adapted});
+        if (undo_.size() > 40)
             undo_.erase(undo_.begin());
     }
 
-    void adapt(DesignerApp& app, RestorationDesign& r, bool proximal, bool occlusal)
-    {
-        if (!ensureBase(app, r))
-            return;
-        pushUndo(r);
-        auto base = r.base;
-        auto contacts = r.contacts;
-        const crown::CrownParameters p = r.effectiveParams();
-        std::vector<float> disp = r.displacement;
-        const int tooth = r.tooth;
-        const bool map = distanceMap_;
-        app.tasks().start("Adapting contacts", [&app, base, contacts, p, disp, tooth, proximal, occlusal, map](const ProgressFn& progress) mutable
-                          -> ui::TaskRunner::Continuation {
-            reportProgress(progress, 0.2f, "Adapting the crown surface");
-            crown::adaptContacts(*base, p, *contacts, disp, proximal, occlusal);
-            return [&app, disp, tooth, map] {
-                if (RestorationDesign* r = findRestoration(app, tooth)) {
-                    r->displacement = disp;
-                    regenerate(app, *r, map);
-                    app.markModified();
-                }
-            };
-        });
-    }
-
+    bool ready_ = false;
+    // Tooth placement
+    int placeMode_ = 0; // move, rotate, scale
+    bool moveAll_ = true;
+    bool dragging_ = false;
+    ImVec2 lastMouse_{0, 0};
+    std::vector<int> dragTeeth_;
+    // Free-forming
+    bool brushOn_ = true;
+    int brushMode_ = 0; // add/remove, smooth/flatten
+    int tool_ = 0;
+    std::vector<crown::BrushTool> tools_;
+    std::size_t builtinCount_ = 0;
+    crown::BrushTool editTool_ = [] {
+        crown::BrushTool t;
+        t.name = "My tool";
+        t.kind = crown::BrushKind::Custom;
+        return t;
+    }();
+    int dragPt_ = -1;
+    bool painting_ = false;
+    float brushRadius_ = 1.5f;
+    float brushStrength_ = 0.3f;
+    bool distanceMap_ = true;
+    // Connectors
     bool moveInView_ = true;
     bool gizmoWasUsing_ = false;
     std::vector<std::pair<std::string, std::vector<crown::ConnectorEdit>>> connectorUndo_;
-    int brush_ = 0;
-    float brushRadius_ = 1.5f;
-    float brushStrength_ = 0.1f;
-    bool distanceMap_ = true;
-    std::vector<std::pair<crown::CrownParameters, std::vector<float>>> undo_;
+    std::vector<UndoEntry> undo_;
+};
+
+// ---------------------------------------------------------------------------
+// Merge
+// ---------------------------------------------------------------------------
+
+class MergeStep final : public Step {
+public:
+    MergeStep() : Step(StepId::Merge) {}
+
+    ViewLayout preferredLayout() const override { return ViewLayout::Single3D; }
+
+    std::optional<std::string> blocker(const DesignerApp& appC) const override
+    {
+        if (auto m = firstMissing(appC, true, true, true))
+            return m;
+        auto& app = const_cast<DesignerApp&>(appC);
+        if (app.tasks().busy())
+            return std::string("Merging...");
+        for (const auto& r : app.doc().restorations) {
+            if (!r.supported() || app.doc().bridgeOf(r.tooth))
+                continue;
+            if (!r.merged)
+                return std::format("Merge {} first.", app.toothText(r.tooth));
+            if (!r.merged->ok)
+                return std::format("{} could not be merged: {}", app.toothText(r.tooth), r.merged->error);
+        }
+        for (const auto& b : app.doc().bridges)
+            if (!b.result || !b.result->ok)
+                return std::format("Bridge {} is not merged{}", bridgeName(app, b), b.result ? ": " + b.result->error : ".");
+        return std::nullopt;
+    }
+
+    void onEnter(DesignerApp& app) override
+    {
+        syncRestorations(app);
+        setOverlaysVisible(app, "connector:", false);
+        setOverlaysVisible(app, "die:", false);
+        started_ = false;
+    }
+
+    void onLeave(DesignerApp& app) override
+    {
+        app.doc().removeOverlaysWithPrefix("bridge:");
+        for (auto& r : app.doc().restorations)
+            updateCrownOverlay(app, r, false);
+    }
+
+    void update(DesignerApp& app) override
+    {
+        if (!started_ && !app.loading() && !restorationsPending(app) && !app.tasks().busy()) {
+            bool rebuilt = false;
+            for (auto& r : app.doc().restorations)
+                if (r.supported() && r.adapted && !r.crown) {
+                    regenerate(app, r, false);
+                    rebuilt = true;
+                }
+            if (!rebuilt) {
+                started_ = true;
+                if (RestorationDesign* a = app.doc().active(); a && a->supported() && (a->isPontic() || a->marginClosed()))
+                    viewOcclusal(app, *a, 35.0);
+                bool needed = false;
+                for (const auto& r : app.doc().restorations)
+                    needed |= r.supported() && r.adapted && !r.merged;
+                for (const auto& b : app.doc().bridges)
+                    needed |= !b.result;
+                if (needed)
+                    startMergeAll(app);
+            }
+        }
+        // Show the finished parts once they are there.
+        std::size_t done = 0;
+        for (const auto& r : app.doc().restorations)
+            done += r.merged ? 1 : 0;
+        for (const auto& b : app.doc().bridges)
+            done += b.result ? 100 : 0;
+        if (done != shown_) {
+            shown_ = done;
+            refreshOverlays(app);
+        }
+    }
+
+    void drawPanel(DesignerApp& app) override
+    {
+        const ui::Palette& pal = ui::palette();
+        const bool busy = app.tasks().busy();
+        ImGui::Spacing();
+        ui::beginCard("##merge");
+        ui::subheading("Merged restorations");
+        bool any = false;
+        for (const auto& r : app.doc().restorations) {
+            if (!r.supported() || app.doc().bridgeOf(r.tooth))
+                continue;
+            any = true;
+            ImGui::TextUnformatted(restorationLabel(app, r).c_str());
+            if (!r.merged)
+                ui::mutedText(busy ? "  merging..." : "  not merged");
+            else if (!r.merged->ok)
+                ImGui::TextColored(pal.danger, "  %s", r.merged->error.c_str());
+            else {
+                ImGui::TextColored(r.merged->watertight ? pal.success : pal.danger, "  %s", r.merged->watertight ? "watertight" : "NOT watertight");
+                ImGui::SameLine();
+                ui::mutedText("%.0f mm3, min. thickness %.2f mm", r.merged->volume, r.merged->minThickness);
+            }
+        }
+        for (const auto& b : app.doc().bridges) {
+            any = true;
+            ImGui::TextUnformatted(std::format("Bridge {}", bridgeName(app, b)).c_str());
+            if (!b.result)
+                ui::mutedText(busy ? "  merging..." : "  not merged");
+            else if (!b.result->ok)
+                ImGui::TextColored(pal.danger, "  %s", b.result->error.c_str());
+            else {
+                ImGui::TextColored(b.result->watertight ? pal.success : pal.danger, "  %s", b.result->watertight ? "watertight" : "NOT watertight");
+                ImGui::SameLine();
+                ui::mutedText("%.0f mm3", b.result->volume);
+                for (std::size_t i = 0; i < b.result->connectorAreas.size() && i + 1 < b.teeth.size(); ++i) {
+                    const double a = b.result->connectorAreas[i];
+                    ImGui::TextColored(a + 1e-3 >= b.connectorArea ? pal.success : pal.warning, "  %s-%s", app.toothText(b.teeth[i]).c_str(),
+                                       app.toothText(b.teeth[i + 1]).c_str());
+                    ImGui::SameLine();
+                    ui::mutedText("connector %.1f mm2", a);
+                }
+            }
+        }
+        if (!any)
+            ui::mutedText("Nothing to merge.");
+        ui::endCard();
+        ImGui::Spacing();
+        ui::wrappedMutedText("Each crown is its free-formed shell united with the crown bottom (cement gap, border, minimum thickness), "
+                             "minus the preparation space. Bridges are joined with their connectors.");
+        const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        if (ui::button("Merge again", ImVec2(half, 0), !busy)) {
+            clear(app);
+            started_ = false;
+        }
+        ImGui::SameLine();
+        if (ui::button("Remove merged parts", ImVec2(half, 0), !busy)) {
+            clear(app);
+            app.goToStep(StepId::Freeforming);
+        }
+    }
+
+private:
+    static void clear(DesignerApp& app)
+    {
+        for (auto& r : app.doc().restorations)
+            r.merged.reset();
+        for (auto& b : app.doc().bridges)
+            b.result.reset();
+        app.doc().removeOverlaysWithPrefix("bridge:");
+    }
+
+    void refreshOverlays(DesignerApp& app)
+    {
+        Document& doc = app.doc();
+        doc.removeOverlaysWithPrefix("bridge:");
+        for (auto& b : doc.bridges) {
+            RestorationDesign* first = findRestoration(app, b.teeth.front());
+            if (!b.result || !b.result->ok || !first)
+                continue;
+            DisplayMesh dm;
+            dm.gpu = std::make_unique<gfx::GpuMesh>(b.result->mesh);
+            dm.scanId = first->prepScanId;
+            dm.color = kCrownColor;
+            doc.setOverlay("bridge:" + b.label(), std::move(dm));
+        }
+        for (auto& r : doc.restorations)
+            updateCrownOverlay(app, r, false);
+    }
+
+    bool started_ = false;
+    std::size_t shown_ = ~std::size_t{0};
 };
 
 } // namespace
@@ -2480,9 +3504,25 @@ std::unique_ptr<Step> makeInsertionAxisStep()
 {
     return std::make_unique<InsertionAxisStep>();
 }
-std::unique_ptr<Step> makeCrownDesignStep()
+std::unique_ptr<Step> makeCrownBottomStep()
 {
-    return std::make_unique<CrownDesignStep>();
+    return std::make_unique<CrownBottomStep>();
+}
+std::unique_ptr<Step> makeToothPlacementStep()
+{
+    return std::make_unique<CrownToolStep>(StepId::ToothPlacement);
+}
+std::unique_ptr<Step> makeFreeformingStep()
+{
+    return std::make_unique<CrownToolStep>(StepId::Freeforming);
+}
+std::unique_ptr<Step> makeConnectorsStep()
+{
+    return std::make_unique<CrownToolStep>(StepId::Connectors);
+}
+std::unique_ptr<Step> makeMergeStep()
+{
+    return std::make_unique<MergeStep>();
 }
 
 bool restorationsPending(const DesignerApp& app)
@@ -2525,7 +3565,8 @@ void syncRestorations(DesignerApp& app)
                 r.prepPoint = saved.prepPoint;
                 r.insertionAxis = saved.insertionAxis;
                 r.displacement = saved.displacement;
-                r.crownGenerated = saved.crownGenerated;
+                r.placed = saved.placed;
+                r.adapted = saved.adapted;
             } else if (prep) {
                 log::warn("The scan of tooth {} changed since the design was saved; the margin must be redrawn.", app.toothText(saved.tooth));
             }
@@ -2617,7 +3658,8 @@ void syncRestorations(DesignerApp& app)
             }
     // Saved crowns: rebuild the geometry once the scan analysis is available.
     for (auto& r : doc.restorations)
-        if (r.crownGenerated && !r.crown && (r.isPontic() || r.marginClosed()) && prepScanFor(app, r.prepScanId) && !app.tasks().busy())
+        if ((r.placed || r.adapted) && !r.crown && !r.libraryTooth && (r.isPontic() || r.marginClosed()) && prepScanFor(app, r.prepScanId) &&
+            !app.tasks().busy())
             regenerate(app, r, false);
 }
 
@@ -2650,13 +3692,25 @@ std::vector<SavedRestoration> captureRestorations(const DesignerApp& appC)
         s.params = r.params;
         s.orientation = r.orientation;
         s.displacement = r.displacement;
-        s.crownGenerated = r.crownGenerated;
-        if (r.crownGenerated)
+        s.placed = r.placed;
+        s.adapted = r.adapted;
+        if (r.adapted)
             s.crownFile = app.doc().bridgeOf(r.tooth) ? "design/bridge_" + bridgeName(app, *app.doc().bridgeOf(r.tooth)) + ".stl"
                                                        : "design/crown_" + app.toothText(r.tooth) + ".stl";
         out.push_back(std::move(s));
     }
     return out;
+}
+
+// Merge one restoration now (on the calling thread).
+bool mergeNow(DesignerApp& app, RestorationDesign& r)
+{
+    if (r.merged)
+        return r.merged->ok;
+    if (!r.adapted || !r.crown || !ensureBottom(app, r))
+        return false;
+    r.merged = std::make_shared<const crown::CrownMerge>(crown::mergeCrown(*r.base, *r.crown, r.isPontic() ? Mesh{} : *r.bottom));
+    return r.merged->ok;
 }
 
 std::vector<CrownExport> crownExports(DesignerApp& app, bool merge)
@@ -2669,7 +3723,15 @@ std::vector<CrownExport> crownExports(DesignerApp& app, bool merge)
         if (!b.result && merge) {
             if (b.connectors.empty())
                 bridgeChanged(app, b);
-            b.result = mergeBridge(units, b.connectors);
+            bool ok = true;
+            for (auto& u : units) {
+                RestorationDesign* r = findRestoration(app, u.tooth);
+                ok = ok && r && mergeNow(app, *r);
+                if (ok)
+                    u.solid = std::shared_ptr<const Mesh>(r->merged, &r->merged->mesh);
+            }
+            if (ok)
+                b.result = mergeBridge(units, b.connectors);
         }
         if (!b.result || !b.result->ok) {
             log::warn("Bridge {} is not exported: {}", bridgeName(app, b), b.result ? b.result->error : "not merged");
@@ -2681,10 +3743,16 @@ std::vector<CrownExport> crownExports(DesignerApp& app, bool merge)
                        app.numbering() == dental::Numbering::Universal ? std::format("OcclusaCAD Bridge {} (Universal; FDI {}), scan coordinates, mm", name, b.label())
                                                                        : std::format("OcclusaCAD Bridge {} (FDI), scan coordinates, mm", name)});
     }
-    for (const auto& r : app.doc().restorations) {
-        if (!r.crown || !r.crownGenerated || app.doc().bridgeOf(r.tooth) || r.isPontic())
+    for (auto& r : app.doc().restorations) {
+        if (!r.adapted || app.doc().bridgeOf(r.tooth) || r.isPontic())
             continue;
-        auto mesh = std::make_shared<Mesh>(r.crown->mesh);
+        if (merge)
+            mergeNow(app, r);
+        if (!r.merged || !r.merged->ok) {
+            log::warn("Crown {} is not exported: {}", app.toothText(r.tooth), r.merged ? r.merged->error : "not merged");
+            continue;
+        }
+        auto mesh = std::make_shared<Mesh>(r.merged->mesh);
         mesh->colors.clear();
         const char* kind = r.params.coping ? "Coping" : "Crown";
         const std::string tooth = app.toothText(r.tooth);
@@ -2698,7 +3766,7 @@ std::vector<CrownExport> crownExports(DesignerApp& app, bool merge)
 bool allRestorationsExported(const DesignerApp& app)
 {
     for (const auto& r : app.doc().restorations)
-        if (r.crownGenerated && !r.crown)
+        if (r.adapted && !r.crown)
             return false;
     return true;
 }
@@ -2847,22 +3915,70 @@ bool runCrownDemo(DesignerApp& app, CrownDemo& demo)
                 }
                 u.params.library = demo.library;
             }
-        app.goToStep(StepId::CrownDesign); // starts the automatic design
+        app.goToStep(StepId::CrownBottom);
         demo.state = 4;
         demo.waitFrames = 3;
         return true;
-    case 4: {
+    case 4: // crown bottoms exist, then tooth placement positions the teeth automatically
+        for (auto& u : doc.restorations)
+            if (u.supported() && !u.isPontic() && !ensureBottom(app, u)) {
+                log::error("DEMO crown bottom of tooth {} failed: {}", u.tooth, u.dieError);
+                return finish(3);
+            }
+        app.goToStep(StepId::ToothPlacement);
+        demo.state = 5;
+        demo.waitFrames = 3;
+        return true;
+    case 5: { // wait for the positioning, then adapt to the margins
+        for (const auto& u : doc.restorations)
+            if (u.supported() && !u.placed)
+                return true;
+        if (app.tasks().busy())
+            return true;
+        for (auto& u : doc.restorations)
+            if (u.supported() && !u.adapted)
+                adaptToMargin(app, u.tooth, false);
+        app.goToStep(StepId::Freeforming);
+        demo.state = 6;
+        demo.waitFrames = 3;
+        return true;
+    }
+    case 6: // free-forming: adapt the contacts (approximal and occlusal) on the shells
+        for (auto& u : doc.restorations) {
+            if (!u.supported() || u.isPontic() || !u.crown || !ensureBase(app, u))
+                continue;
+            if (!u.params.coping)
+                crown::adaptContacts(*u.base, u.effectiveParams(), *u.contacts, u.displacement, true, u.contacts->antagonist != nullptr, 0.6, true);
+            regenerate(app, u, false);
+        }
+        app.goToStep(StepId::Connectors);
+        demo.state = 7;
+        demo.waitFrames = 3;
+        return true;
+    case 7:
+        for (const auto& b : doc.bridges)
+            if (b.connectors.empty()) {
+                log::error("DEMO bridge {} has no connectors", b.label());
+                return finish(3);
+            }
+        app.goToStep(StepId::Merge); // merges everything
+        demo.state = 8;
+        demo.waitFrames = 3;
+        return true;
+    case 8: {
+        if (app.tasks().busy())
+            return true;
         for (const auto& u : doc.restorations) {
             if (!u.supported())
                 continue;
-            if (!u.crown) {
-                log::error("DEMO design of tooth {} failed: {}", u.tooth, u.dieError);
+            if (!u.merged || !u.merged->ok) {
+                log::error("DEMO merge of tooth {} failed: {}", u.tooth, u.merged ? u.merged->error : std::string("missing"));
                 return finish(3);
             }
             log::info("DEMO {} {} ({}): {} triangles, volume {:.0f} mm3, min thickness {:.2f} mm, {}", u.isPontic() ? "pontic" : "crown", u.tooth,
-                      u.params.library.empty() ? crown::ToothLibraryRegistry::kDefaultLibrary : u.params.library, u.crown->mesh.triangleCount(),
-                      u.crown->volume, u.crown->minThickness, u.crown->watertight ? "watertight" : "NOT watertight");
-            if (!u.crown->watertight)
+                      u.params.library.empty() ? crown::ToothLibraryRegistry::kDefaultLibrary : u.params.library, u.merged->mesh.triangleCount(),
+                      u.merged->volume, u.merged->minThickness, u.merged->watertight ? "watertight" : "NOT watertight");
+            if (!u.merged->watertight)
                 return finish(3);
         }
         for (const auto& b : doc.bridges) {
@@ -2889,9 +4005,11 @@ bool runCrownDemo(DesignerApp& app, CrownDemo& demo)
             crown::ConnectorEdit& e = b.editFor(0);
             e.area = b.connectorArea + 3.0;
             e.offset.z += 0.3;
-            b.selectedConnector = 0;
             bridgeChanged(app, b);
-            const auto units = bridgeUnits(app, b);
+            auto units = bridgeUnits(app, b);
+            for (auto& u : units)
+                if (RestorationDesign* r = findRestoration(app, u.tooth); r && r->merged)
+                    u.solid = std::shared_ptr<const Mesh>(r->merged, &r->merged->mesh);
             b.result = mergeBridge(units, b.connectors);
             const double measured = b.result->ok && !b.result->connectorAreas.empty() ? b.result->connectorAreas[0] : 0.0;
             log::info("DEMO connector {}-{} edited to {:.1f} mm2 (+0.3 mm occlusal): merged {}, measured {:.1f} mm2{}", b.teeth[0], b.teeth[1], e.area,
@@ -2901,7 +4019,7 @@ bool runCrownDemo(DesignerApp& app, CrownDemo& demo)
         }
         if (demo.save && app.caseMode())
             app.saveDesign(true);
-        demo.state = 5;
+        demo.state = 9;
         demo.waitFrames = 2;
         return true;
     }
@@ -2911,3 +4029,4 @@ bool runCrownDemo(DesignerApp& app, CrownDemo& demo)
 }
 
 } // namespace occlusa::designer
+

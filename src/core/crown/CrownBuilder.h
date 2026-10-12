@@ -21,21 +21,37 @@ struct CrownParameters {
     bool coping = false;           // uniform-thickness coping instead of full anatomy
     double copingThickness = 0.5;
 
-    // Cement space on the intaglio (inner) surface.
-    double cementGap = 0.03;       // from `distanceToMargin` upwards
-    double extraGap = 0.04;        // added a further 1 mm above that
-    double distanceToMargin = 0.8; // band along the margin that fits closely
+    // Crown bottom (the inside of the crown), after exocad's "Crown Bottoms" dialog.
+    // Gap: cement space on the intaglio surface.
+    double cementGap = 0.08;       // gap zone ("Gap")
+    double distanceToMargin = 1.0; // zone along the margin without cement gap ("From margin")
+    double axialSpacing = 0.02;    // additional spacing along the insertion axis (gap zone)
+    double radialSpacing = 0.02;   // additional spacing perpendicular to it (gap zone)
+    // Border: the crown edge at the margin.
+    double borderHorizontal = 0.2; // horizontal border width outwards from the margin
+    double borderAngled = 0.3;     // length of the angled part after it
+    double borderAngleDeg = 60.0;  // angle of the angled part (from the horizontal)
+    double borderVertical = 0.0;   // additional vertical border
+    double belowMargin = 0.0;      // offset of the margin along the insertion direction (+ = apical)
+    // Advanced: undercuts and manufacturing.
     bool blockOutUndercuts = true;
+    double blockoutAngleDeg = 0.0;   // draft of the blocked-out surface (0 = straight down)
+    double blockoutUntouchable = 0.0; // zone along the margin that is never blocked out (mm)
+    bool anticipateMilling = true;    // tool diameter compensation of the intaglio
+    double toolDiameter = 1.2;        // smallest milling tool (choose slightly above the real one)
+    bool bullnoseTool = false;
+    double toolFlatPercent = 0.0;     // bullnose tool: 0 = round bur, 100 = flat end
 
-    // Material thickness.
+    // Material thickness (the crown bottom is at least this thick everywhere).
     double minThickness = 0.5;
-    double marginThickness = 0.08;
 
     // Anatomy and placement (0 = take from the tooth template).
     double crownHeight = 0.0;      // margin plane to cusp tips
     double halfMesial = 0.0, halfDistal = 0.0, halfBuccal = 0.0, halfLingual = 0.0;
     double rotationDeg = 0.0;      // about the insertion axis
-    double shiftMesial = 0.0, shiftBuccal = 0.0;
+    double tiltMesialDeg = 0.0;    // tilt of the tooth axis towards mesial
+    double tiltBuccalDeg = 0.0;    // tilt of the tooth axis towards buccal
+    double shiftMesial = 0.0, shiftBuccal = 0.0, shiftOcclusal = 0.0;
     double cuspScale = 1.0;
     bool flipMesioDistal = false;
     bool flipBuccoLingual = false;
@@ -76,9 +92,20 @@ struct CrownBase {
     MeshBvh intaglioBvh;
     std::vector<float> blockoutDepth;    // per die vertex
     std::vector<float> marginDistance;   // per die vertex, mm to the margin
+    std::vector<float> gap;              // per die vertex: cement gap + spacing applied (mm)
+    std::vector<float> toolCompensation; // per die vertex: material removed for the milling tool (mm)
 };
 
 CrownBase makeCrownBase(DieRegion die, const CrownFrame& frame, const CrownParameters& params);
+
+// The crown bottom as a closed solid: the intaglio, the border at the margin (horizontal, angled,
+// vertical) and the minimum thickness over the intaglio. The finished crown is the union of the
+// designed shell and this solid, minus the preparation space (see mergeCrown).
+Mesh makeCrownBottom(const CrownBase& base, const CrownParameters& params);
+
+// The library tooth placed by the parameters (size, rotation, tilt, shifts, cusp height) but not
+// attached to the margin, in prep-scan coordinates. Tooth placement shows and moves this.
+Mesh placedLibraryTooth(const CrownBase& base, const CrownParameters& params);
 
 // Neighbouring geometry for contacts, in prep-scan coordinates.
 struct ContactScene {
@@ -107,21 +134,38 @@ struct CrownMesh {
     int thickenedVertices = 0;          // pushed out to reach the minimum thickness
 };
 
-CrownMesh buildCrown(const CrownBase& base, const CrownParameters& params, std::span<const float> displacement = {});
+// `shell`: the zero-thickness anatomic shell adapted to the margin, closed over the die (no
+// intaglio, no thickness enforcement): what the technician sculpts before merging. Otherwise the
+// classic solid crown on the intaglio with the minimum thickness enforced.
+CrownMesh buildCrown(const CrownBase& base, const CrownParameters& params, std::span<const float> displacement = {}, bool shell = false);
+
+// The finished crown: (shell united with the crown bottom) minus the preparation space. The
+// shell's die cap and anything below the margin are removed with the preparation space.
+struct CrownMerge {
+    Mesh mesh;
+    bool ok = false;
+    std::string error;
+    bool watertight = false;
+    double volume = 0.0;       // mm^3
+    double minThickness = 0.0; // over the intaglio, away from the margin
+};
+CrownMerge mergeCrown(const CrownBase& base, const CrownMesh& shell, const Mesh& bottom);
 
 // Automatic fitting.
 void fitProximal(const CrownBase& base, const ContactScene& contacts, CrownParameters& params);
-bool fitOcclusalHeight(const CrownBase& base, const ContactScene& contacts, CrownParameters& params, std::span<const float> displacement = {});
+// `shell`: evaluate the zero-thickness shell (tooth placement, free-forming) instead of the classic solid.
+bool fitOcclusalHeight(const CrownBase& base, const ContactScene& contacts, CrownParameters& params, std::span<const float> displacement = {},
+                       bool shell = false);
 
 // Adapt the surface to the contact targets (pull back where too close / overlapping, extend
 // facing areas within `reach` towards the target). Modifies `displacement` (one value per vertex).
 void adaptContacts(const CrownBase& base, const CrownParameters& params, const ContactScene& contacts, std::vector<float>& displacement,
-                   bool proximal, bool occlusal, double reach = 0.6);
+                   bool proximal, bool occlusal, double reach = 0.6, bool shell = false);
 
 // Signed distance of each vertex to the nearest contact geometry (NaN where nothing is within `maxDistance`).
 std::vector<float> contactDistances(const CrownMesh& crown, const ContactScene& contacts, float maxDistance = 2.0f);
 
-enum class BrushMode { Add, Remove, Smooth };
+enum class BrushMode { Add, Remove, Smooth, Flatten };
 void applyBrush(const CrownMesh& crown, std::vector<float>& displacement, const glm::vec3& center, float radius, float strength, BrushMode mode);
 
 // Thickness of the outer surface over the intaglio, per vertex (NaN for intaglio vertices).
